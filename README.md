@@ -33,13 +33,13 @@ tun2socks 默认路由
 
 ## 默认端口
 
-默认公网端口均在 `33801-33810` 范围内：
+公网端口不再限制在固定范围；直接回车会自动生成不重复的高位端口。下表仅为示例：
 
 | 用途 | 宿主机端口 | 入口容器 | 后端目标 |
 | --- | ---: | --- | --- |
-| AnyTLS | 33801 | JiaKuan-Entry-AnyTLS | 172.31.253.10:33801 |
-| NaiveProxy HTTP/伪装 | 33802 | JiaKuan-Entry-NaiveHTTP | 172.31.253.10:33802 |
-| NaiveProxy HTTPS | 33803 | JiaKuan-Entry-NaiveHTTPS | 172.31.253.10:33803 |
+| AnyTLS | 自动生成，例如 21366 | JiaKuan-Entry-AnyTLS | 172.31.253.10:同宿主机端口 |
+| NaiveProxy HTTP/伪装 | 自动生成，例如 21367 | JiaKuan-Entry-NaiveHTTP | 172.31.253.10:同宿主机端口 |
+| NaiveProxy HTTPS | 自动生成，例如 21368 | JiaKuan-Entry-NaiveHTTPS | 172.31.253.10:同宿主机端口 |
 
 
 ## Docker 镜像策略
@@ -86,6 +86,13 @@ bash "$INSTALLER_DIR/bootstrap-install.sh"
 JIAKUAN_DOMAIN=example.com JIAKUAN_PROJECT_ROOT=/www/wwwroot/example.com bash /tmp/jiakuan-tun2socks-gateway-installer/bootstrap-install.sh
 ```
 
+公网端口也可用环境变量预填；不预填时在交互中直接回车会自动生成高位端口：
+
+```bash
+JIAKUAN_ANYTLS_PORT=21366 JIAKUAN_NAIVE_HTTP_PORT=21367 JIAKUAN_NAIVE_HTTPS_PORT=21368 \
+  bash /tmp/jiakuan-tun2socks-gateway-installer/bootstrap-install.sh
+```
+
 ## 交互项说明
 
 脚本会询问：
@@ -94,8 +101,8 @@ JIAKUAN_DOMAIN=example.com JIAKUAN_PROJECT_ROOT=/www/wwwroot/example.com bash /t
 - 项目根目录：默认 `/www/wwwroot/<域名>`；也可输入任意绝对路径，例如 `/data/sites/example.com`。
 - 证书 fullchain 路径与 privkey 路径
 - 家宽 SOCKS5 IP/域名、端口、用户名、密码
-- AnyTLS 端口与密码
-- NaiveProxy HTTP/HTTPS 端口、用户名、密码、伪装地址
+- AnyTLS 端口与密码；端口留空自动生成高位端口
+- NaiveProxy HTTP/HTTPS 端口、用户名、密码、伪装地址；端口留空自动生成高位端口
 - Docker 网络名、子网、tun2socks 固定 IP
 - 是否清理旧 RedSocks 方案容器
 - 是否清理旧 jiakuan iptables 残留规则

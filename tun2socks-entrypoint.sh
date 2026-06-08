@@ -37,7 +37,7 @@ if [ -z "$ETH_GW" ]; then
   warn "未检测到 $ETH_DEV 默认网关，仍会尝试启动；请检查 Docker bridge 网络。"
 fi
 
-log "创建 TUN 设备：$TUN，地址：$ADDR"
+log "创建 TUN 设备：${TUN}，地址：${ADDR}"
 ip link del "$TUN" >/dev/null 2>&1 || true
 ip tuntap add mode tun dev "$TUN"
 ip addr add "$ADDR" dev "$TUN"

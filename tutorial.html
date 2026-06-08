@@ -39,11 +39,12 @@ bash "$INSTALLER_DIR/bootstrap-install.sh"</pre>
   </section>
   <section>
     <h2>默认端口</h2>
+    <p>公网端口不再限制固定范围。交互时直接回车会自动生成不重复的高位端口，也可以手动输入任意未占用的合法 TCP 端口。</p>
     <table>
       <tr><th>服务</th><th>宿主机端口</th><th>入口容器</th><th>后端目标</th></tr>
-      <tr><td>AnyTLS</td><td>33801</td><td>JiaKuan-Entry-AnyTLS</td><td>172.31.253.10:33801</td></tr>
-      <tr><td>NaiveProxy HTTP</td><td>33802</td><td>JiaKuan-Entry-NaiveHTTP</td><td>172.31.253.10:33802</td></tr>
-      <tr><td>NaiveProxy HTTPS</td><td>33803</td><td>JiaKuan-Entry-NaiveHTTPS</td><td>172.31.253.10:33803</td></tr>
+      <tr><td>AnyTLS</td><td>自动生成，例如 21366</td><td>JiaKuan-Entry-AnyTLS</td><td>172.31.253.10:同宿主机端口</td></tr>
+      <tr><td>NaiveProxy HTTP</td><td>自动生成，例如 21367</td><td>JiaKuan-Entry-NaiveHTTP</td><td>172.31.253.10:同宿主机端口</td></tr>
+      <tr><td>NaiveProxy HTTPS</td><td>自动生成，例如 21368</td><td>JiaKuan-Entry-NaiveHTTPS</td><td>172.31.253.10:同宿主机端口</td></tr>
     </table>
   </section>
   <section>

@@ -39,7 +39,7 @@ ensure_project_docker_egress_rules() {
     echo "[提醒] 未找到 $ENTRY_NET 对应 bridge 接口（推断值：${bridge_if:-空}），跳过出站 NAT 规则检查。"
     return 0
   fi
-  echo "[信息] 确保 Docker 入口网络可出站：$ENTRY_SUBNET，经 $bridge_if 做本项目专属 NAT/FORWARD 规则。"
+  echo "[信息] 确保 Docker 入口网络可出站：${ENTRY_SUBNET}，经 ${bridge_if} 做本项目专属 NAT/FORWARD 规则。"
   iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE
   iptables -C FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \

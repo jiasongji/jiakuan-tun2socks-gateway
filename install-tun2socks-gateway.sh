@@ -6,7 +6,7 @@ IFS=$'
 # Debian 12 + 宝塔面板 + Docker：tun2socks + socat 家宽 SOCKS5 出口网关交互式部署脚本。
 # 默认不安装 Docker、不重启 Docker、不修改宿主机默认路由、不迁移 Docker 全局 data-root。
 
-VERSION="2026-06-08.2"
+VERSION="2026-06-08.3"
 DEFAULT_PROJECT_ROOT="${JIAKUAN_PROJECT_ROOT:-}"
 DEFAULT_DOMAIN="${JIAKUAN_DOMAIN:-}"
 DEFAULT_CERT_FILE=""
@@ -30,9 +30,9 @@ DEFAULT_TUN_GATEWAY="198.18.0.1"
 DEFAULT_SOCKS_HOST=""
 DEFAULT_SOCKS_PORT="1080"
 
-DEFAULT_ANYTLS_PORT="33801"
-DEFAULT_NAIVE_HTTP_PORT="33802"
-DEFAULT_NAIVE_HTTPS_PORT="33803"
+DEFAULT_ANYTLS_PORT="${JIAKUAN_ANYTLS_PORT:-}"
+DEFAULT_NAIVE_HTTP_PORT="${JIAKUAN_NAIVE_HTTP_PORT:-}"
+DEFAULT_NAIVE_HTTPS_PORT="${JIAKUAN_NAIVE_HTTPS_PORT:-}"
 DEFAULT_FAKE_HOST="https://soft.xiaoz.org"
 
 DEFAULT_TUN2SOCKS_IMAGE="jiasongji/jiakuan-tun2socks:latest"
@@ -73,6 +73,39 @@ gen_pass() {
   echo
 }
 
+gen_high_port() {
+  # 生成 20000-60999 范围内的高位端口，避免常见系统端口与多数面板端口。
+  local n
+  n="$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -d ' ')"
+  if [ -z "$n" ]; then
+    n="$RANDOM"
+  fi
+  echo $((20000 + n % 41000))
+}
+
+port_is_listening() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}$"
+  else
+    return 1
+  fi
+}
+
+gen_unique_high_port() {
+  local p used i
+  for i in {1..80}; do
+    p="$(gen_high_port)"
+    used=" ${ANYTLS_PORT:-} ${NAIVE_HTTP_PORT:-} ${NAIVE_HTTPS_PORT:-} "
+    if [[ "$used" != *" $p "* ]] && ! port_is_listening "$p"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  # 极端情况下退回到最后一次生成值，后续端口占用检查仍会拦截。
+  printf '%s\n' "$p"
+}
+
 prompt_default() {
   local var_name="$1" label="$2" default_value="$3" input=""
   if [ -n "$default_value" ]; then
@@ -87,9 +120,26 @@ prompt_default() {
   fi
 }
 
+prompt_port_auto() {
+  local var_name="$1" label="$2" default_value="$3" input="" port=""
+  if [ -n "$default_value" ]; then
+    read -r -p "${label} [${default_value}；输入 auto 自动生成高位端口]: " input
+    input="${input:-$default_value}"
+  else
+    read -r -p "$label [回车自动生成高位端口]: " input
+  fi
+  if [ -z "$input" ] || [ "$input" = "auto" ] || [ "$input" = "AUTO" ]; then
+    port="$(gen_unique_high_port)"
+    printf -v "$var_name" '%s' "$port"
+    log "已自动生成 ${label}：${port}"
+  else
+    printf -v "$var_name" '%s' "$input"
+  fi
+}
+
 prompt_secret_optional() {
   local var_name="$1" label="$2" input=""
-  read -r -s -p "$label（无则直接回车）: " input
+  read -r -s -p "${label}（无则直接回车）: " input
   echo
   printf -v "$var_name" '%s' "$input"
 }
@@ -166,12 +216,11 @@ validate_port() {
   fi
 }
 
-validate_public_port_range() {
+validate_public_port() {
   local name="$1" value="$2"
   validate_port "$name" "$value"
-  if [ "$value" -lt 33801 ] || [ "$value" -gt 33810 ]; then
-    err "$name 必须在 33801-33810 范围内，当前为：$value"
-    exit 1
+  if [ "$value" -lt 1024 ]; then
+    warn "${name} 当前为低位端口 ${value}；root 可以绑定，但请确认没有与系统服务冲突。"
   fi
 }
 
@@ -187,9 +236,9 @@ validate_inputs() {
   [ -n "$DOMAIN" ] || { err "域名不能为空。"; exit 1; }
   [ -n "$SOCKS_HOST" ] || { err "SOCKS5 IP/域名不能为空。"; exit 1; }
   validate_port "SOCKS5 端口" "$SOCKS_PORT"
-  validate_public_port_range "AnyTLS 端口" "$ANYTLS_PORT"
-  validate_public_port_range "NaiveProxy HTTP 端口" "$NAIVE_HTTP_PORT"
-  validate_public_port_range "NaiveProxy HTTPS 端口" "$NAIVE_HTTPS_PORT"
+  validate_public_port "AnyTLS 端口" "$ANYTLS_PORT"
+  validate_public_port "NaiveProxy HTTP 端口" "$NAIVE_HTTP_PORT"
+  validate_public_port "NaiveProxy HTTPS 端口" "$NAIVE_HTTPS_PORT"
   if [ "$ANYTLS_PORT" = "$NAIVE_HTTP_PORT" ] || [ "$ANYTLS_PORT" = "$NAIVE_HTTPS_PORT" ] || [ "$NAIVE_HTTP_PORT" = "$NAIVE_HTTPS_PORT" ]; then
     err "AnyTLS、NaiveProxy HTTP、NaiveProxy HTTPS 三个公网端口不能重复。"
     exit 1
@@ -246,7 +295,7 @@ resolve_socks_ip() {
     SOCKS_ROUTE_IP="$(dig +short A "$SOCKS_HOST" | awk 'NR==1 {print}')"
   fi
   if [ -z "${SOCKS_ROUTE_IP:-}" ]; then
-    err "无法解析 SOCKS5 域名：$SOCKS_HOST。请改填 IPv4 地址，或先修复宿主机 DNS。"
+    err "无法解析 SOCKS5 域名：${SOCKS_HOST}。请改填 IPv4 地址，或先修复宿主机 DNS。"
     exit 1
   fi
 }
@@ -352,10 +401,10 @@ collect_inputs() {
 
   echo
   log "--- AnyTLS / NaiveProxy 本地服务 ---"
-  prompt_default ANYTLS_PORT "AnyTLS 端口，范围 33801-33810" "$DEFAULT_ANYTLS_PORT"
+  prompt_port_auto ANYTLS_PORT "AnyTLS 端口" "$DEFAULT_ANYTLS_PORT"
   prompt_secret_auto ANYTLS_PASS "AnyTLS 密码"
-  prompt_default NAIVE_HTTP_PORT "NaiveProxy HTTP/伪装端口，范围 33801-33810" "$DEFAULT_NAIVE_HTTP_PORT"
-  prompt_default NAIVE_HTTPS_PORT "NaiveProxy HTTPS 端口，范围 33801-33810" "$DEFAULT_NAIVE_HTTPS_PORT"
+  prompt_port_auto NAIVE_HTTP_PORT "NaiveProxy HTTP/伪装端口" "$DEFAULT_NAIVE_HTTP_PORT"
+  prompt_port_auto NAIVE_HTTPS_PORT "NaiveProxy HTTPS 端口" "$DEFAULT_NAIVE_HTTPS_PORT"
   prompt_user_auto NAIVE_USER "NaiveProxy 用户名"
   prompt_secret_auto NAIVE_PASS "NaiveProxy 密码"
   prompt_default FAKE_HOST "NaiveProxy 反代/伪装地址" "$DEFAULT_FAKE_HOST"
@@ -394,7 +443,7 @@ write_env_file() {
     done
   } >"$env_file"
   chmod 600 "$env_file"
-  log "已写入敏感配置：$env_file（权限 600，已被 .gitignore 排除）"
+  log "已写入敏感配置：${env_file}（权限 600，已被 .gitignore 排除）"
 }
 
 write_static_files() {
@@ -459,10 +508,10 @@ SOCKS_USER=
 SOCKS_PASS=
 SOCKS_ROUTE_IP=203.0.113.10
 
-ANYTLS_PORT=33801
+ANYTLS_PORT=21366
 ANYTLS_PASS=请替换为强随机密码
-NAIVE_HTTP_PORT=33802
-NAIVE_HTTPS_PORT=33803
+NAIVE_HTTP_PORT=21367
+NAIVE_HTTPS_PORT=21368
 NAIVE_USER=请替换为用户名
 NAIVE_PASS=请替换为强随机密码
 FAKE_HOST=https://soft.xiaoz.org
@@ -516,7 +565,7 @@ if [ -z "$ETH_GW" ]; then
   warn "未检测到 $ETH_DEV 默认网关，仍会尝试启动；请检查 Docker bridge 网络。"
 fi
 
-log "创建 TUN 设备：$TUN，地址：$ADDR"
+log "创建 TUN 设备：${TUN}，地址：${ADDR}"
 ip link del "$TUN" >/dev/null 2>&1 || true
 ip tuntap add mode tun dev "$TUN"
 ip addr add "$ADDR" dev "$TUN"
@@ -660,7 +709,7 @@ ensure_project_docker_egress_rules() {
     echo "[提醒] 未找到 $ENTRY_NET 对应 bridge 接口（推断值：${bridge_if:-空}），跳过出站 NAT 规则检查。"
     return 0
   fi
-  echo "[信息] 确保 Docker 入口网络可出站：$ENTRY_SUBNET，经 $bridge_if 做本项目专属 NAT/FORWARD 规则。"
+  echo "[信息] 确保 Docker 入口网络可出站：${ENTRY_SUBNET}，经 ${bridge_if} 做本项目专属 NAT/FORWARD 规则。"
   iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE
   iptables -C FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
@@ -961,13 +1010,13 @@ tun2socks 默认路由
 
 ## 默认端口
 
-默认公网端口均在 `33801-33810` 范围内：
+公网端口不再限制在固定范围；直接回车会自动生成不重复的高位端口。下表仅为示例：
 
 | 用途 | 宿主机端口 | 入口容器 | 后端目标 |
 | --- | ---: | --- | --- |
-| AnyTLS | 33801 | JiaKuan-Entry-AnyTLS | 172.31.253.10:33801 |
-| NaiveProxy HTTP/伪装 | 33802 | JiaKuan-Entry-NaiveHTTP | 172.31.253.10:33802 |
-| NaiveProxy HTTPS | 33803 | JiaKuan-Entry-NaiveHTTPS | 172.31.253.10:33803 |
+| AnyTLS | 自动生成，例如 21366 | JiaKuan-Entry-AnyTLS | 172.31.253.10:同宿主机端口 |
+| NaiveProxy HTTP/伪装 | 自动生成，例如 21367 | JiaKuan-Entry-NaiveHTTP | 172.31.253.10:同宿主机端口 |
+| NaiveProxy HTTPS | 自动生成，例如 21368 | JiaKuan-Entry-NaiveHTTPS | 172.31.253.10:同宿主机端口 |
 
 ## 一键部署
 
@@ -986,6 +1035,13 @@ bash "$INSTALLER_DIR/bootstrap-install.sh"
 JIAKUAN_DOMAIN=example.com JIAKUAN_PROJECT_ROOT=/www/wwwroot/example.com bash /tmp/jiakuan-tun2socks-gateway-installer/bootstrap-install.sh
 ```
 
+公网端口也可用环境变量预填；不预填时在交互中直接回车会自动生成高位端口：
+
+```bash
+JIAKUAN_ANYTLS_PORT=21366 JIAKUAN_NAIVE_HTTP_PORT=21367 JIAKUAN_NAIVE_HTTPS_PORT=21368 \
+  bash /tmp/jiakuan-tun2socks-gateway-installer/bootstrap-install.sh
+```
+
 ## 交互项说明
 
 脚本会询问：
@@ -994,8 +1050,8 @@ JIAKUAN_DOMAIN=example.com JIAKUAN_PROJECT_ROOT=/www/wwwroot/example.com bash /t
 - 项目根目录：默认 `/www/wwwroot/<域名>`；也可输入任意绝对路径，例如 `/data/sites/example.com`。
 - 证书 fullchain 路径与 privkey 路径
 - 家宽 SOCKS5 IP/域名、端口、用户名、密码
-- AnyTLS 端口与密码
-- NaiveProxy HTTP/HTTPS 端口、用户名、密码、伪装地址
+- AnyTLS 端口与密码；端口留空自动生成高位端口
+- NaiveProxy HTTP/HTTPS 端口、用户名、密码、伪装地址；端口留空自动生成高位端口
 - Docker 网络名、子网、tun2socks 固定 IP
 - 是否清理旧 RedSocks 方案容器
 - 是否清理旧 jiakuan iptables 残留规则
@@ -1108,11 +1164,12 @@ bash "$INSTALLER_DIR/bootstrap-install.sh"</pre>
   </section>
   <section>
     <h2>默认端口</h2>
+    <p>公网端口不再限制固定范围。交互时直接回车会自动生成不重复的高位端口，也可以手动输入任意未占用的合法 TCP 端口。</p>
     <table>
       <tr><th>服务</th><th>宿主机端口</th><th>入口容器</th><th>后端目标</th></tr>
-      <tr><td>AnyTLS</td><td>33801</td><td>JiaKuan-Entry-AnyTLS</td><td>172.31.253.10:33801</td></tr>
-      <tr><td>NaiveProxy HTTP</td><td>33802</td><td>JiaKuan-Entry-NaiveHTTP</td><td>172.31.253.10:33802</td></tr>
-      <tr><td>NaiveProxy HTTPS</td><td>33803</td><td>JiaKuan-Entry-NaiveHTTPS</td><td>172.31.253.10:33803</td></tr>
+      <tr><td>AnyTLS</td><td>自动生成，例如 21366</td><td>JiaKuan-Entry-AnyTLS</td><td>172.31.253.10:同宿主机端口</td></tr>
+      <tr><td>NaiveProxy HTTP</td><td>自动生成，例如 21367</td><td>JiaKuan-Entry-NaiveHTTP</td><td>172.31.253.10:同宿主机端口</td></tr>
+      <tr><td>NaiveProxy HTTPS</td><td>自动生成，例如 21368</td><td>JiaKuan-Entry-NaiveHTTPS</td><td>172.31.253.10:同宿主机端口</td></tr>
     </table>
   </section>
   <section>
@@ -1161,7 +1218,7 @@ verify_tun2socks_image_params() {
   # 因此这里同时兼容 -device 与 --device，避免把有效镜像误判为无效。
   for flag in device proxy interface loglevel fwmark; do
     if ! grep -Eq "(^|[[:space:]])--?${flag}([[:space:]]|$)" "$help_file"; then
-      err "当前 $TUN2SOCKS_IMAGE 帮助信息未发现参数 -$flag。已保存帮助输出：$help_file"
+      err "当前 ${TUN2SOCKS_IMAGE} 帮助信息未发现参数 -${flag}。已保存帮助输出：${help_file}"
       exit 1
     fi
   done
@@ -1263,7 +1320,7 @@ check_public_ports_available() {
   fi
   for p in "$ANYTLS_PORT" "$NAIVE_HTTP_PORT" "$NAIVE_HTTPS_PORT"; do
     if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}$"; then
-      err "公网端口 $p 已被占用。请释放端口或重新运行脚本换成 33801-33810 内空闲端口。"
+      err "公网端口 $p 已被占用。请释放端口，或重新运行脚本换成其他空闲端口；直接回车可自动生成高位端口。"
       exit 1
     fi
   done
@@ -1274,7 +1331,7 @@ ensure_docker_network() {
     local subnet
     subnet="$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$ENTRY_NET" 2>/dev/null || true)"
     if [ "$subnet" != "$ENTRY_SUBNET" ]; then
-      err "Docker 网络 $ENTRY_NET 已存在但子网为 $subnet，不等于期望 $ENTRY_SUBNET。请手动检查后重试。"
+      err "Docker 网络 ${ENTRY_NET} 已存在但子网为 ${subnet}，不等于期望 ${ENTRY_SUBNET}。请手动检查后重试。"
       exit 1
     fi
     log "Docker 网络已存在：$ENTRY_NET ($ENTRY_SUBNET)"
@@ -1311,7 +1368,7 @@ ensure_project_docker_egress_rules() {
     warn "未找到 $ENTRY_NET 对应 bridge 接口（推断值：${bridge_if:-空}），跳过出站 NAT 规则检查。"
     return 0
   fi
-  log "确保 Docker 入口网络可出站：$ENTRY_SUBNET，经 $bridge_if 做本项目专属 NAT/FORWARD 规则。"
+  log "确保 Docker 入口网络可出站：${ENTRY_SUBNET}，经 ${bridge_if} 做本项目专属 NAT/FORWARD 规则。"
   iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE
   iptables -C FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
@@ -1372,17 +1429,17 @@ wait_container_running() {
 }
 
 run_tun2socks() {
-  log "启动 $TUN2SOCKS_NAME（不发布宿主机端口）。"
+  log "启动 ${TUN2SOCKS_NAME}（不发布宿主机端口）。"
   docker run -d     --name "$TUN2SOCKS_NAME"     --hostname "$TUN2SOCKS_NAME"     --restart unless-stopped     --network "$ENTRY_NET"     --ip "$TUN2SOCKS_IP"     --cap-add NET_ADMIN     --device /dev/net/tun     --sysctl net.ipv6.conf.all.disable_ipv6=1     --sysctl net.ipv6.conf.default.disable_ipv6=1     -e "PROXY=$TUN2SOCKS_PROXY_URL"     -e "TUN=$TUN_NAME"     -e "ADDR=$TUN_ADDR"     -e "TUN_GATEWAY=$TUN_GATEWAY"     -e "ENTRY_SUBNET=$ENTRY_SUBNET"     -e "ENTRY_GATEWAY=$ENTRY_GATEWAY"     -e "TUN2SOCKS_IP=$TUN2SOCKS_IP"     -e "SOCKS_ROUTE_IP=$SOCKS_ROUTE_IP"     -e "LOGLEVEL=info"     -e "DISABLE_IPV6=1"     -v "$PROJECT_DIR/tun2socks-entrypoint.sh:/jiakuan/tun2socks-entrypoint.sh:ro"     --entrypoint /jiakuan/tun2socks-entrypoint.sh     "$TUN2SOCKS_IMAGE" >/dev/null
   wait_container_running "$TUN2SOCKS_NAME" 60
   post_host_net_guard
 }
 
 run_business_containers() {
-  log "启动 $ANYTLS_NAME，共享 $TUN2SOCKS_NAME 网络命名空间。"
+  log "启动 ${ANYTLS_NAME}，共享 ${TUN2SOCKS_NAME} 网络命名空间。"
   docker run -d     --name "$ANYTLS_NAME"     --restart unless-stopped     --network "container:$TUN2SOCKS_NAME"     "$ANYTLS_IMAGE"     /app/anytls-server -l ":$ANYTLS_PORT" -p "$ANYTLS_PASS" >/dev/null
 
-  log "启动 $NAIVE_NAME，共享 $TUN2SOCKS_NAME 网络命名空间。"
+  log "启动 ${NAIVE_NAME}，共享 ${TUN2SOCKS_NAME} 网络命名空间。"
   docker run -d     --name "$NAIVE_NAME"     --restart unless-stopped     --network "container:$TUN2SOCKS_NAME"     -e "DOMAIN=$DOMAIN"     -e "NAIVE_HTTP_PORT=$NAIVE_HTTP_PORT"     -e "NAIVE_HTTPS_PORT=$NAIVE_HTTPS_PORT"     -e "NAIVE_USER=$NAIVE_USER"     -e "NAIVE_PASS=$NAIVE_PASS"     -e "FAKE_HOST=$FAKE_HOST"     -v "$PROJECT_DIR/naive-data:/data"     -v "$CERT_FILE:/cert/fullchain.pem:ro"     -v "$CERT_KEY_FILE:/cert/privkey.pem:ro"     "$NAIVE_IMAGE"     /bin/bash /data/entry.sh >/dev/null
 
   wait_container_running "$ANYTLS_NAME" 45
@@ -1499,7 +1556,7 @@ GitHub 仓库：$GITHUB_REPO_URL
 - NaiveProxy 用户名：$NAIVE_USER
 - NaiveProxy 密码：$NAIVE_PASS
 
-上游 SOCKS5：$SOCKS_HOST:$SOCKS_PORT（认证：$([ -n "$SOCKS_USER" ] && echo "有" || echo "无")）
+上游 SOCKS5：${SOCKS_HOST}:${SOCKS_PORT}（认证：$([ -n "${SOCKS_USER}" ] && echo "有" || echo "无")）
 敏感配置文件：$PROJECT_DIR/jiakuan.env（权限 600，不提交 GitHub）
 
 验证命令：

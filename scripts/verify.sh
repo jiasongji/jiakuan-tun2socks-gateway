@@ -85,7 +85,7 @@ docker exec "$TUN2SOCKS_NAME" ip -4 route 2>/dev/null || true
 section "Docker 入口网络出站 NAT 检查"
 if command -v iptables >/dev/null 2>&1 && docker network inspect "$ENTRY_NET" >/dev/null 2>&1; then
   bridge_if="$(get_entry_bridge_if || true)"
-  echo "入口网络：$ENTRY_NET，子网：$ENTRY_SUBNET，bridge：${bridge_if:-未识别}"
+  echo "入口网络：${ENTRY_NET}，子网：${ENTRY_SUBNET}，bridge：${bridge_if:-未识别}"
   if [ -n "${bridge_if:-}" ] && iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null; then
     echo "NAT 规则存在：$ENTRY_SUBNET -> MASQUERADE"
   else
