@@ -13,6 +13,7 @@ set -a
 source "$ENV_FILE"
 set +a
 
+VERIFY_FAILED=0
 
 mask_sensitive() {
   sed -E \
@@ -24,13 +25,17 @@ mask_sensitive() {
     -e 's#(SOCKS_PASS=)[^[:space:]]+#\1***#g'
 }
 
+mark_fail() {
+  VERIFY_FAILED=1
+  echo "[失败] $*" >&2
+}
+
 check_host_net() {
   if command -v curl >/dev/null 2>&1; then
     curl -4fsS --connect-timeout 8 --max-time 15 https://api.ipify.org >/dev/null 2>&1 && return 0
   fi
   timeout 6 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1
 }
-
 
 get_entry_bridge_if() {
   local net_id bridge_name
@@ -43,18 +48,37 @@ get_entry_bridge_if() {
   printf '%s\n' "$bridge_name"
 }
 
+docker_socks_curl() {
+  local network="${1:-}" docker_args curl_args
+  docker_args=(run --rm)
+  if [ -n "$network" ]; then
+    docker_args+=(--network "$network")
+  fi
+  curl_args=(-4fsS --connect-timeout 15 --max-time 30)
+  if [ -n "${SOCKS_USER:-}" ]; then
+    curl_args+=(--proxy-user "${SOCKS_USER}:${SOCKS_PASS:-}")
+  fi
+  curl_args+=(--socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://api.ipify.org)
+  docker "${docker_args[@]}" "$CURL_IMAGE" "${curl_args[@]}"
+}
 
 section() { printf '\n== %s ==\n' "$*"; }
 
 section "容器状态"
 docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E "(${TUN2SOCKS_NAME}|${ANYTLS_NAME}|${NAIVE_NAME}|${ENTRY_ANYTLS_NAME}|${ENTRY_NAIVE_HTTP_NAME}|${ENTRY_NAIVE_HTTPS_NAME})" || true
+for name in "$TUN2SOCKS_NAME" "$ANYTLS_NAME" "$NAIVE_NAME" "$ENTRY_ANYTLS_NAME" "$ENTRY_NAIVE_HTTP_NAME" "$ENTRY_NAIVE_HTTPS_NAME"; do
+  state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"
+  if [ "$state" != "running" ]; then
+    mark_fail "容器未运行：$name（当前状态：${state:-不存在}）"
+  fi
+done
 
 section "Docker 端口发布"
 docker ps --format 'table {{.Names}}\t{{.Ports}}' | grep -E "(${ENTRY_ANYTLS_NAME}|${ENTRY_NAIVE_HTTP_NAME}|${ENTRY_NAIVE_HTTPS_NAME})" || true
 
 echo
 if docker ps --format '{{.Names}} {{.Ports}}' | grep -E "^(${ANYTLS_NAME}|${NAIVE_NAME}) " | grep -q '0\.0\.0\.0:'; then
-  echo "警告：检测到业务容器直接发布端口，请检查配置。"
+  mark_fail "检测到业务容器直接发布宿主机端口，请检查配置。"
 else
   echo "业务容器未直接发布宿主机端口：符合 socat 入口边界设计。"
 fi
@@ -63,24 +87,37 @@ section "宿主机联网检测"
 if check_host_net; then
   echo "宿主机联网正常。"
 else
-  echo "宿主机联网检测失败。"
+  mark_fail "宿主机联网检测失败。"
 fi
 
 section "tun2socks 容器路由检查"
 echo "默认目的地址路由（应走 tun）："
-docker exec "$TUN2SOCKS_NAME" ip route get 1.1.1.1 2>/dev/null || true
+default_route="$(docker exec "$TUN2SOCKS_NAME" ip route get 1.1.1.1 2>/dev/null || true)"
+printf '%s\n' "$default_route"
+if ! printf '%s\n' "$default_route" | grep -q " dev ${TUN_NAME} "; then
+  mark_fail "默认目的地址未走 ${TUN_NAME}。"
+fi
+
 echo "Docker 入口网关路由（应走 eth0）："
-docker exec "$TUN2SOCKS_NAME" ip route get "$ENTRY_GATEWAY" 2>/dev/null || true
+entry_route="$(docker exec "$TUN2SOCKS_NAME" ip route get "$ENTRY_GATEWAY" 2>/dev/null || true)"
+printf '%s\n' "$entry_route"
+if ! printf '%s\n' "$entry_route" | grep -q " dev eth0 "; then
+  mark_fail "Docker 入口网关路由未走 eth0。"
+fi
+
 if [ -n "${SOCKS_ROUTE_IP:-}" ]; then
   echo "SOCKS5 服务器路由（应走 eth0）："
-  docker exec "$TUN2SOCKS_NAME" ip route get "$SOCKS_ROUTE_IP" 2>/dev/null || true
+  socks_route="$(docker exec "$TUN2SOCKS_NAME" ip route get "$SOCKS_ROUTE_IP" 2>/dev/null || true)"
+  printf '%s\n' "$socks_route"
+  if ! printf '%s\n' "$socks_route" | grep -q " dev eth0 "; then
+    mark_fail "SOCKS5 服务器路由未走 eth0，可能形成路由环。"
+  fi
 else
-  echo "未记录 SOCKS_ROUTE_IP，跳过 SOCKS5 直连路由检查。"
+  mark_fail "未记录 SOCKS_ROUTE_IP，无法检查 SOCKS5 直连路由。"
 fi
 
 echo "完整 IPv4 路由表："
 docker exec "$TUN2SOCKS_NAME" ip -4 route 2>/dev/null || true
-
 
 section "Docker 入口网络出站 NAT 检查"
 if command -v iptables >/dev/null 2>&1 && docker network inspect "$ENTRY_NET" >/dev/null 2>&1; then
@@ -89,35 +126,45 @@ if command -v iptables >/dev/null 2>&1 && docker network inspect "$ENTRY_NET" >/
   if [ -n "${bridge_if:-}" ] && iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null; then
     echo "NAT 规则存在：$ENTRY_SUBNET -> MASQUERADE"
   else
-    echo "警告：未检测到本项目 Docker 入口网络 NAT 规则，容器可能无法连接上游 SOCKS5。"
+    mark_fail "未检测到本项目 Docker 入口网络 NAT 规则，容器可能无法连接上游 SOCKS5。"
   fi
 else
-  echo "iptables 或 Docker 网络不可用，跳过。"
+  mark_fail "iptables 或 Docker 入口网络不可用，无法检查 NAT 规则。"
 fi
 
 section "入口 Docker 网络显式 SOCKS5 出口 IP"
 if docker image inspect "$CURL_IMAGE" >/dev/null 2>&1 || docker pull "$CURL_IMAGE" >/dev/null 2>&1; then
-  if [ -n "${SOCKS_USER:-}" ]; then
-    docker run --rm --network "$ENTRY_NET" "$CURL_IMAGE" -4fsS --connect-timeout 15 --max-time 30 --socks5-hostname "$SOCKS_USER:$SOCKS_PASS@$SOCKS_HOST:$SOCKS_PORT" https://api.ipify.org || true
+  if out="$(docker_socks_curl "$ENTRY_NET" 2>&1)"; then
+    printf '显式 SOCKS5 出口 IP：%s\n' "$out"
   else
-    docker run --rm --network "$ENTRY_NET" "$CURL_IMAGE" -4fsS --connect-timeout 15 --max-time 30 --socks5-hostname "$SOCKS_HOST:$SOCKS_PORT" https://api.ipify.org || true
+    printf '%s\n' "$out" | mask_sensitive
+    mark_fail "入口 Docker 网络无法通过上游 SOCKS5 出口。请检查 SOCKS5 端口、认证、服务端白名单和防火墙。"
   fi
-  echo
 else
-  echo "无法拉取验证用 curl 镜像，跳过入口网络显式 SOCKS5 出口测试。"
+  mark_fail "无法拉取验证用 curl 镜像，无法执行入口网络 SOCKS5 出口测试。"
 fi
 
 section "业务网络命名空间出口 IP"
 if docker image inspect "$CURL_IMAGE" >/dev/null 2>&1 || docker pull "$CURL_IMAGE" >/dev/null 2>&1; then
-  docker run --rm --network "container:$TUN2SOCKS_NAME" "$CURL_IMAGE" -4fsS --connect-timeout 15 --max-time 30 https://api.ipify.org || true
-  echo
+  if out="$(docker run --rm --network "container:$TUN2SOCKS_NAME" "$CURL_IMAGE" -4fsS --connect-timeout 15 --max-time 30 https://api.ipify.org 2>&1)"; then
+    printf '业务命名空间出口 IP：%s\n' "$out"
+  else
+    printf '%s\n' "$out" | mask_sensitive
+    mark_fail "业务网络命名空间出口 IP 检测失败，业务容器实际出站不可用。"
+  fi
 else
-  echo "无法拉取验证用 curl 镜像，跳过出口 IP 检测。"
+  mark_fail "无法拉取验证用 curl 镜像，无法执行业务出口 IP 检测。"
 fi
 
 section "socat 入口端口监听检查"
 if command -v ss >/dev/null 2>&1; then
-  ss -ltnp 2>/dev/null | grep -E ":(${ANYTLS_PORT}|${NAIVE_HTTP_PORT}|${NAIVE_HTTPS_PORT})\b" || true
+  ss_output="$(ss -ltnp 2>/dev/null | grep -E ":(${ANYTLS_PORT}|${NAIVE_HTTP_PORT}|${NAIVE_HTTPS_PORT})\b" || true)"
+  printf '%s\n' "$ss_output"
+  for p in "$ANYTLS_PORT" "$NAIVE_HTTP_PORT" "$NAIVE_HTTPS_PORT"; do
+    if ! printf '%s\n' "$ss_output" | grep -Eq ":${p}\b"; then
+      mark_fail "宿主机未监听入口端口：$p。"
+    fi
+  done
 else
   echo "系统未安装 ss，改用 docker port："
   docker port "$ENTRY_ANYTLS_NAME" || true
@@ -125,8 +172,21 @@ else
   docker port "$ENTRY_NAIVE_HTTPS_NAME" || true
 fi
 
+section "NaiveProxy 认证提示"
+if docker logs --tail=200 "$NAIVE_NAME" 2>&1 | grep -Fq '"Proxy-Authorization":[]'; then
+  echo "提醒：NaiveProxy 日志出现空 Proxy-Authorization；如果客户端无法使用，请优先核对 NaiveProxy 客户端用户名和密码。"
+fi
+
 section "日志检查（敏感字段已尽量遮蔽）"
 for name in "$TUN2SOCKS_NAME" "$ANYTLS_NAME" "$NAIVE_NAME" "$ENTRY_ANYTLS_NAME" "$ENTRY_NAIVE_HTTP_NAME" "$ENTRY_NAIVE_HTTPS_NAME"; do
   echo "---- $name ----"
   docker logs --tail=100 "$name" 2>&1 | mask_sensitive || true
 done
+
+section "验证结论"
+if [ "$VERIFY_FAILED" -eq 0 ]; then
+  echo "验证通过。"
+else
+  echo "验证失败：上方 [失败] 项需要处理。"
+fi
+exit "$VERIFY_FAILED"

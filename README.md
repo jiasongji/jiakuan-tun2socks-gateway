@@ -151,6 +151,19 @@ bash <项目根目录>/jiakuan-proxy/scripts/rollback.sh
 docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org
 ```
 
+从 `2026-06-08.4` 版本开始，上游 SOCKS5 与业务出口属于关键验证项：
+
+- 安装前会先检测上游 SOCKS5 TCP 端口与显式 SOCKS5 出口；失败时不会替换现有同名部署。
+- 创建 Docker 入口网络后，会再检测入口网络能否显式通过 SOCKS5 出口；失败时不会启动业务容器。
+- 部署后的 `scripts/verify.sh` 会对关键项返回非零退出码；自动验证失败时安装脚本会回滚本次新部署。
+
+## 常见故障判断
+
+- `connect: connection refused`：上游 SOCKS5 的 IP/端口没有监听、端口填错、服务端防火墙拒绝或源 IP 未放行；这不是 tun2socks 参数问题。
+- `SOCKS5 authentication failed` 或显式 SOCKS5 出口检测失败：优先核对上游 SOCKS5 用户名/密码。上游 SOCKS5 用户名/密码留空表示无认证，不会自动生成。
+- NaiveProxy 日志出现空 `Proxy-Authorization`：通常是客户端没有带 NaiveProxy 认证或用户名/密码不匹配；请使用部署完成摘要里显示的 NaiveProxy 用户名和密码。
+- 宿主机端口正常监听但业务出口 IP 检测失败：优先看 `JiaKuan-Tun2Socks` 日志中的上游 SOCKS5 连接错误。
+
 ## DNS 与 UDP 说明
 
 本方案优先保证 AnyTLS / NaiveProxy 的 TCP 出站经由家宽 SOCKS5。tun2socks 可以处理 TCP/UDP 包，但 DNS 与 UDP 是否可用取决于上游 SOCKS5 是否支持 UDP 转发，以及业务程序的解析方式。若上游 SOCKS5 不支持 UDP，可能出现域名解析失败或 UDP 流量不可用；此时应另行设计可信 DNS 方案，例如上游侧解析、DoH/DoT 或支持 UDP 的代理链路。

@@ -6,7 +6,7 @@ IFS=$'
 # Debian 12 + 宝塔面板 + Docker：tun2socks + socat 家宽 SOCKS5 出口网关交互式部署脚本。
 # 默认不安装 Docker、不重启 Docker、不修改宿主机默认路由、不迁移 Docker 全局 data-root。
 
-VERSION="2026-06-08.3"
+VERSION="2026-06-08.4"
 DEFAULT_PROJECT_ROOT="${JIAKUAN_PROJECT_ROOT:-}"
 DEFAULT_DOMAIN="${JIAKUAN_DOMAIN:-}"
 DEFAULT_CERT_FILE=""
@@ -308,6 +308,91 @@ build_socks_proxy_url() {
     TUN2SOCKS_PROXY_URL="socks5://${u}:${p}@${SOCKS_ROUTE_IP}:${SOCKS_PORT}"
   else
     TUN2SOCKS_PROXY_URL="socks5://${SOCKS_ROUTE_IP}:${SOCKS_PORT}"
+  fi
+}
+
+sanitize_text() {
+  local text="$1"
+  if [ -n "${SOCKS_PASS:-}" ]; then
+    text="${text//$SOCKS_PASS/***}"
+  fi
+  if [ -n "${NAIVE_PASS:-}" ]; then
+    text="${text//$NAIVE_PASS/***}"
+  fi
+  if [ -n "${ANYTLS_PASS:-}" ]; then
+    text="${text//$ANYTLS_PASS/***}"
+  fi
+  printf '%s' "$text"
+}
+
+host_socks_curl_test() {
+  local args
+  args=(-4fsS --connect-timeout 12 --max-time 30)
+  if [ -n "${SOCKS_USER:-}" ]; then
+    args+=(--proxy-user "${SOCKS_USER}:${SOCKS_PASS:-}")
+  fi
+  args+=(--socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://api.ipify.org)
+  curl "${args[@]}"
+}
+
+docker_socks_curl_test() {
+  local network="${1:-}" docker_args curl_args
+  docker_args=(run --rm)
+  if [ -n "$network" ]; then
+    docker_args+=(--network "$network")
+  fi
+  curl_args=(-4fsS --connect-timeout 15 --max-time 30)
+  if [ -n "${SOCKS_USER:-}" ]; then
+    curl_args+=(--proxy-user "${SOCKS_USER}:${SOCKS_PASS:-}")
+  fi
+  curl_args+=(--socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://api.ipify.org)
+  docker "${docker_args[@]}" "$CURL_IMAGE" "${curl_args[@]}"
+}
+
+preflight_upstream_socks_host() {
+  log "预检测上游 SOCKS5：${SOCKS_ROUTE_IP}:${SOCKS_PORT}"
+  if [ -n "${SOCKS_USER:-}" ] && [ -z "${SOCKS_PASS:-}" ]; then
+    warn "已填写 SOCKS5 用户名但密码为空；如果上游 SOCKS5 要求账号密码认证，这通常会导致认证失败。"
+  fi
+
+  if ! timeout 8 bash -c "</dev/tcp/${SOCKS_ROUTE_IP}/${SOCKS_PORT}" >/dev/null 2>&1; then
+    err "上游 SOCKS5 TCP 端口不可达或拒绝连接：${SOCKS_ROUTE_IP}:${SOCKS_PORT}"
+    err "请先确认家宽 SOCKS5 服务端正在监听该端口、VPS 源 IP 已放行、防火墙/安全组未拦截。脚本不会继续替换现有部署。"
+    exit 1
+  fi
+
+  local out
+  if command -v curl >/dev/null 2>&1; then
+    if out="$(host_socks_curl_test 2>&1)"; then
+      log "上游 SOCKS5 显式出口检测通过，出口 IP：$out"
+    else
+      out="$(sanitize_text "$out")"
+      err "上游 SOCKS5 显式出口检测失败，脚本不会继续替换现有部署。"
+      err "常见原因：SOCKS5 账号密码错误、服务端白名单未放行、本端填错端口、上游服务端仅支持内网访问。"
+      err "curl 错误：$out"
+      exit 1
+    fi
+  else
+    warn "宿主机未安装 curl，只完成 TCP 端口连通性检查；后续会用 Docker curl 镜像继续验证。"
+  fi
+}
+
+preflight_upstream_socks_entry_network() {
+  log "预检测 Docker 入口网络通过上游 SOCKS5 出口。"
+  local out
+  if docker image inspect "$CURL_IMAGE" >/dev/null 2>&1 || docker pull "$CURL_IMAGE" >/dev/null 2>&1; then
+    if out="$(docker_socks_curl_test "$ENTRY_NET" 2>&1)"; then
+      log "Docker 入口网络显式 SOCKS5 出口检测通过，出口 IP：$out"
+    else
+      out="$(sanitize_text "$out")"
+      err "Docker 入口网络无法通过上游 SOCKS5 出口，脚本不会继续启动业务容器。"
+      err "请检查 Docker 自定义网络出站、上游 SOCKS5 认证、服务端白名单和防火墙。"
+      err "curl 错误：$out"
+      exit 1
+    fi
+  else
+    err "无法拉取验证用 curl 镜像：$CURL_IMAGE。脚本不会跳过关键出口验证。"
+    exit 1
   fi
 }
 
@@ -835,6 +920,7 @@ set -a
 source "$ENV_FILE"
 set +a
 
+VERIFY_FAILED=0
 
 mask_sensitive() {
   sed -E \
@@ -846,6 +932,11 @@ mask_sensitive() {
     -e 's#(SOCKS_PASS=)[^[:space:]]+#\1***#g'
 }
 
+mark_fail() {
+  VERIFY_FAILED=1
+  echo "[失败] $*" >&2
+}
+
 check_host_net() {
   if command -v curl >/dev/null 2>&1; then
     curl -4fsS --connect-timeout 8 --max-time 15 https://api.ipify.org >/dev/null 2>&1 && return 0
@@ -853,17 +944,48 @@ check_host_net() {
   timeout 6 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1
 }
 
+get_entry_bridge_if() {
+  local net_id bridge_name
+  bridge_name="$(docker network inspect -f '{{ index .Options "com.docker.network.bridge.name" }}' "$ENTRY_NET" 2>/dev/null || true)"
+  if [ -z "$bridge_name" ] || [ "$bridge_name" = "<no value>" ]; then
+    net_id="$(docker network inspect -f '{{.Id}}' "$ENTRY_NET" 2>/dev/null || true)"
+    [ -n "$net_id" ] || return 1
+    bridge_name="br-${net_id:0:12}"
+  fi
+  printf '%s\n' "$bridge_name"
+}
+
+docker_socks_curl() {
+  local network="${1:-}" docker_args curl_args
+  docker_args=(run --rm)
+  if [ -n "$network" ]; then
+    docker_args+=(--network "$network")
+  fi
+  curl_args=(-4fsS --connect-timeout 15 --max-time 30)
+  if [ -n "${SOCKS_USER:-}" ]; then
+    curl_args+=(--proxy-user "${SOCKS_USER}:${SOCKS_PASS:-}")
+  fi
+  curl_args+=(--socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://api.ipify.org)
+  docker "${docker_args[@]}" "$CURL_IMAGE" "${curl_args[@]}"
+}
+
 section() { printf '\n== %s ==\n' "$*"; }
 
 section "容器状态"
 docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E "(${TUN2SOCKS_NAME}|${ANYTLS_NAME}|${NAIVE_NAME}|${ENTRY_ANYTLS_NAME}|${ENTRY_NAIVE_HTTP_NAME}|${ENTRY_NAIVE_HTTPS_NAME})" || true
+for name in "$TUN2SOCKS_NAME" "$ANYTLS_NAME" "$NAIVE_NAME" "$ENTRY_ANYTLS_NAME" "$ENTRY_NAIVE_HTTP_NAME" "$ENTRY_NAIVE_HTTPS_NAME"; do
+  state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"
+  if [ "$state" != "running" ]; then
+    mark_fail "容器未运行：$name（当前状态：${state:-不存在}）"
+  fi
+done
 
 section "Docker 端口发布"
 docker ps --format 'table {{.Names}}\t{{.Ports}}' | grep -E "(${ENTRY_ANYTLS_NAME}|${ENTRY_NAIVE_HTTP_NAME}|${ENTRY_NAIVE_HTTPS_NAME})" || true
 
 echo
 if docker ps --format '{{.Names}} {{.Ports}}' | grep -E "^(${ANYTLS_NAME}|${NAIVE_NAME}) " | grep -q '0\.0\.0\.0:'; then
-  echo "警告：检测到业务容器直接发布端口，请检查配置。"
+  mark_fail "检测到业务容器直接发布宿主机端口，请检查配置。"
 else
   echo "业务容器未直接发布宿主机端口：符合 socat 入口边界设计。"
 fi
@@ -872,35 +994,84 @@ section "宿主机联网检测"
 if check_host_net; then
   echo "宿主机联网正常。"
 else
-  echo "宿主机联网检测失败。"
+  mark_fail "宿主机联网检测失败。"
 fi
 
 section "tun2socks 容器路由检查"
 echo "默认目的地址路由（应走 tun）："
-docker exec "$TUN2SOCKS_NAME" ip route get 1.1.1.1 2>/dev/null || true
+default_route="$(docker exec "$TUN2SOCKS_NAME" ip route get 1.1.1.1 2>/dev/null || true)"
+printf '%s\n' "$default_route"
+if ! printf '%s\n' "$default_route" | grep -q " dev ${TUN_NAME} "; then
+  mark_fail "默认目的地址未走 ${TUN_NAME}。"
+fi
+
 echo "Docker 入口网关路由（应走 eth0）："
-docker exec "$TUN2SOCKS_NAME" ip route get "$ENTRY_GATEWAY" 2>/dev/null || true
+entry_route="$(docker exec "$TUN2SOCKS_NAME" ip route get "$ENTRY_GATEWAY" 2>/dev/null || true)"
+printf '%s\n' "$entry_route"
+if ! printf '%s\n' "$entry_route" | grep -q " dev eth0 "; then
+  mark_fail "Docker 入口网关路由未走 eth0。"
+fi
+
 if [ -n "${SOCKS_ROUTE_IP:-}" ]; then
   echo "SOCKS5 服务器路由（应走 eth0）："
-  docker exec "$TUN2SOCKS_NAME" ip route get "$SOCKS_ROUTE_IP" 2>/dev/null || true
+  socks_route="$(docker exec "$TUN2SOCKS_NAME" ip route get "$SOCKS_ROUTE_IP" 2>/dev/null || true)"
+  printf '%s\n' "$socks_route"
+  if ! printf '%s\n' "$socks_route" | grep -q " dev eth0 "; then
+    mark_fail "SOCKS5 服务器路由未走 eth0，可能形成路由环。"
+  fi
 else
-  echo "未记录 SOCKS_ROUTE_IP，跳过 SOCKS5 直连路由检查。"
+  mark_fail "未记录 SOCKS_ROUTE_IP，无法检查 SOCKS5 直连路由。"
 fi
 
 echo "完整 IPv4 路由表："
 docker exec "$TUN2SOCKS_NAME" ip -4 route 2>/dev/null || true
 
+section "Docker 入口网络出站 NAT 检查"
+if command -v iptables >/dev/null 2>&1 && docker network inspect "$ENTRY_NET" >/dev/null 2>&1; then
+  bridge_if="$(get_entry_bridge_if || true)"
+  echo "入口网络：${ENTRY_NET}，子网：${ENTRY_SUBNET}，bridge：${bridge_if:-未识别}"
+  if [ -n "${bridge_if:-}" ] && iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null; then
+    echo "NAT 规则存在：$ENTRY_SUBNET -> MASQUERADE"
+  else
+    mark_fail "未检测到本项目 Docker 入口网络 NAT 规则，容器可能无法连接上游 SOCKS5。"
+  fi
+else
+  mark_fail "iptables 或 Docker 入口网络不可用，无法检查 NAT 规则。"
+fi
+
+section "入口 Docker 网络显式 SOCKS5 出口 IP"
+if docker image inspect "$CURL_IMAGE" >/dev/null 2>&1 || docker pull "$CURL_IMAGE" >/dev/null 2>&1; then
+  if out="$(docker_socks_curl "$ENTRY_NET" 2>&1)"; then
+    printf '显式 SOCKS5 出口 IP：%s\n' "$out"
+  else
+    printf '%s\n' "$out" | mask_sensitive
+    mark_fail "入口 Docker 网络无法通过上游 SOCKS5 出口。请检查 SOCKS5 端口、认证、服务端白名单和防火墙。"
+  fi
+else
+  mark_fail "无法拉取验证用 curl 镜像，无法执行入口网络 SOCKS5 出口测试。"
+fi
+
 section "业务网络命名空间出口 IP"
 if docker image inspect "$CURL_IMAGE" >/dev/null 2>&1 || docker pull "$CURL_IMAGE" >/dev/null 2>&1; then
-  docker run --rm --network "container:$TUN2SOCKS_NAME" "$CURL_IMAGE" -4fsS --connect-timeout 15 --max-time 30 https://api.ipify.org || true
-  echo
+  if out="$(docker run --rm --network "container:$TUN2SOCKS_NAME" "$CURL_IMAGE" -4fsS --connect-timeout 15 --max-time 30 https://api.ipify.org 2>&1)"; then
+    printf '业务命名空间出口 IP：%s\n' "$out"
+  else
+    printf '%s\n' "$out" | mask_sensitive
+    mark_fail "业务网络命名空间出口 IP 检测失败，业务容器实际出站不可用。"
+  fi
 else
-  echo "无法拉取验证用 curl 镜像，跳过出口 IP 检测。"
+  mark_fail "无法拉取验证用 curl 镜像，无法执行业务出口 IP 检测。"
 fi
 
 section "socat 入口端口监听检查"
 if command -v ss >/dev/null 2>&1; then
-  ss -ltnp 2>/dev/null | grep -E ":(${ANYTLS_PORT}|${NAIVE_HTTP_PORT}|${NAIVE_HTTPS_PORT})\b" || true
+  ss_output="$(ss -ltnp 2>/dev/null | grep -E ":(${ANYTLS_PORT}|${NAIVE_HTTP_PORT}|${NAIVE_HTTPS_PORT})\b" || true)"
+  printf '%s\n' "$ss_output"
+  for p in "$ANYTLS_PORT" "$NAIVE_HTTP_PORT" "$NAIVE_HTTPS_PORT"; do
+    if ! printf '%s\n' "$ss_output" | grep -Eq ":${p}\b"; then
+      mark_fail "宿主机未监听入口端口：$p。"
+    fi
+  done
 else
   echo "系统未安装 ss，改用 docker port："
   docker port "$ENTRY_ANYTLS_NAME" || true
@@ -908,11 +1079,24 @@ else
   docker port "$ENTRY_NAIVE_HTTPS_NAME" || true
 fi
 
+section "NaiveProxy 认证提示"
+if docker logs --tail=200 "$NAIVE_NAME" 2>&1 | grep -Fq '"Proxy-Authorization":[]'; then
+  echo "提醒：NaiveProxy 日志出现空 Proxy-Authorization；如果客户端无法使用，请优先核对 NaiveProxy 客户端用户名和密码。"
+fi
+
 section "日志检查（敏感字段已尽量遮蔽）"
 for name in "$TUN2SOCKS_NAME" "$ANYTLS_NAME" "$NAIVE_NAME" "$ENTRY_ANYTLS_NAME" "$ENTRY_NAIVE_HTTP_NAME" "$ENTRY_NAIVE_HTTPS_NAME"; do
   echo "---- $name ----"
   docker logs --tail=100 "$name" 2>&1 | mask_sensitive || true
 done
+
+section "验证结论"
+if [ "$VERIFY_FAILED" -eq 0 ]; then
+  echo "验证通过。"
+else
+  echo "验证失败：上方 [失败] 项需要处理。"
+fi
+exit "$VERIFY_FAILED"
 VERIFY_SH_EOF
 
   chmod +x "$PROJECT_DIR/scripts/verify.sh"
@@ -932,6 +1116,58 @@ set -a
 source "$ENV_FILE"
 set +a
 
+get_entry_bridge_if() {
+  local net_id bridge_name
+  bridge_name="$(docker network inspect -f '{{ index .Options "com.docker.network.bridge.name" }}' "$ENTRY_NET" 2>/dev/null || true)"
+  if [ -z "$bridge_name" ] || [ "$bridge_name" = "<no value>" ]; then
+    net_id="$(docker network inspect -f '{{.Id}}' "$ENTRY_NET" 2>/dev/null || true)"
+    [ -n "$net_id" ] || return 1
+    bridge_name="br-${net_id:0:12}"
+  fi
+  printf '%s\n' "$bridge_name"
+}
+
+ensure_project_docker_egress_rules() {
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo "[提醒] 未找到 iptables，无法补齐 Docker 自定义网络出站 NAT 规则。"
+    return 0
+  fi
+  if ! docker network inspect "$ENTRY_NET" >/dev/null 2>&1; then
+    echo "[提醒] Docker 网络 $ENTRY_NET 不存在，跳过出站 NAT 规则检查。"
+    return 0
+  fi
+  local bridge_if
+  bridge_if="$(get_entry_bridge_if || true)"
+  if [ -z "$bridge_if" ] || ! ip link show "$bridge_if" >/dev/null 2>&1; then
+    echo "[提醒] 未找到 $ENTRY_NET 对应 bridge 接口（推断值：${bridge_if:-空}），跳过出站 NAT 规则检查。"
+    return 0
+  fi
+  echo "[信息] 确保 Docker 入口网络可出站：${ENTRY_SUBNET}，经 ${bridge_if} 做本项目专属 NAT/FORWARD 规则。"
+  iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE
+  iptables -C FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  iptables -C FORWARD -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT
+  iptables -C FORWARD -i "$bridge_if" -o "$bridge_if" -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -i "$bridge_if" -o "$bridge_if" -j ACCEPT
+  iptables -t nat -C DOCKER -i "$bridge_if" -j RETURN 2>/dev/null || \
+    iptables -t nat -I DOCKER 1 -i "$bridge_if" -j RETURN 2>/dev/null || true
+}
+
+remove_project_docker_egress_rules() {
+  command -v iptables >/dev/null 2>&1 || return 0
+  docker network inspect "$ENTRY_NET" >/dev/null 2>&1 || return 0
+  local bridge_if
+  bridge_if="$(get_entry_bridge_if || true)"
+  [ -n "$bridge_if" ] || return 0
+  while iptables -t nat -D POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null; do :; done
+  while iptables -D FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+  while iptables -D FORWARD -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT 2>/dev/null; do :; done
+  while iptables -D FORWARD -i "$bridge_if" -o "$bridge_if" -j ACCEPT 2>/dev/null; do :; done
+  while iptables -t nat -D DOCKER -i "$bridge_if" -j RETURN 2>/dev/null; do :; done
+}
+
 
 SERVICE_NAME="jiakuan-tun2socks-gateway.service"
 
@@ -939,6 +1175,8 @@ echo "开始回滚本方案创建的容器、网络与 systemd 服务。"
 systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
 rm -f "/etc/systemd/system/$SERVICE_NAME"
 systemctl daemon-reload >/dev/null 2>&1 || true
+
+remove_project_docker_egress_rules
 
 docker rm -f \
   "$ENTRY_NAIVE_HTTPS_NAME" \
@@ -1017,6 +1255,34 @@ tun2socks 默认路由
 | AnyTLS | 自动生成，例如 21366 | JiaKuan-Entry-AnyTLS | 172.31.253.10:同宿主机端口 |
 | NaiveProxy HTTP/伪装 | 自动生成，例如 21367 | JiaKuan-Entry-NaiveHTTP | 172.31.253.10:同宿主机端口 |
 | NaiveProxy HTTPS | 自动生成，例如 21368 | JiaKuan-Entry-NaiveHTTPS | 172.31.253.10:同宿主机端口 |
+
+
+## Docker 镜像策略
+
+本项目默认使用自己 Docker Hub 账号下的项目专用镜像，避免目标服务器直接依赖第三方命名空间：
+
+| 用途 | 默认镜像 | 说明 |
+| --- | --- | --- |
+| tun2socks 网关 | `jiasongji/jiakuan-tun2socks:latest` | 基于官方 tun2socks 镜像封装本项目入口脚本 |
+| AnyTLS | `jiasongji/jiakuan-anytls:latest` | 基于自己账号下已有 AnyTLS 镜像封装 |
+| NaiveProxy | `jiasongji/jiakuan-naiveproxy:latest` | 基于自己账号下已有 NaiveProxy 镜像封装 |
+| socat 入口 | `jiasongji/jiakuan-socat:latest` | 基于 socat 镜像封装 |
+| 验证 curl | `jiasongji/jiakuan-curl:8.10.1` | 验证出口 IP 使用 |
+
+也可以使用仓库内的 GitHub Actions 工作流“发布 Docker 镜像”在云端构建推送。工作流需要仓库 Secrets：`DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`，不会把明文凭据写入代码。
+
+如需重新构建并推送这些镜像，在本机 Docker 已登录后执行：
+
+```bash
+cd /Users/mac/Desktop/Srv/Proxy-VPS/VP-SJC/jiakuan-tun2socks-gateway
+BUILD_PLATFORMS=linux/amd64 DOCKER_NAMESPACE=jiasongji bash scripts/docker-build-push.sh
+```
+
+目标服务器通常是 Debian 12 amd64 VPS，因此默认平台是 `linux/amd64`。如果要同时发布 ARM64，可改为：
+
+```bash
+BUILD_PLATFORMS=linux/amd64,linux/arm64 DOCKER_NAMESPACE=jiasongji bash scripts/docker-build-push.sh
+```
 
 ## 一键部署
 
@@ -1100,6 +1366,19 @@ bash <项目根目录>/jiakuan-proxy/scripts/rollback.sh
 docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org
 ```
 
+从 `2026-06-08.4` 版本开始，上游 SOCKS5 与业务出口属于关键验证项：
+
+- 安装前会先检测上游 SOCKS5 TCP 端口与显式 SOCKS5 出口；失败时不会替换现有同名部署。
+- 创建 Docker 入口网络后，会再检测入口网络能否显式通过 SOCKS5 出口；失败时不会启动业务容器。
+- 部署后的 `scripts/verify.sh` 会对关键项返回非零退出码；自动验证失败时安装脚本会回滚本次新部署。
+
+## 常见故障判断
+
+- `connect: connection refused`：上游 SOCKS5 的 IP/端口没有监听、端口填错、服务端防火墙拒绝或源 IP 未放行；这不是 tun2socks 参数问题。
+- `SOCKS5 authentication failed` 或显式 SOCKS5 出口检测失败：优先核对上游 SOCKS5 用户名/密码。上游 SOCKS5 用户名/密码留空表示无认证，不会自动生成。
+- NaiveProxy 日志出现空 `Proxy-Authorization`：通常是客户端没有带 NaiveProxy 认证或用户名/密码不匹配；请使用部署完成摘要里显示的 NaiveProxy 用户名和密码。
+- 宿主机端口正常监听但业务出口 IP 检测失败：优先看 `JiaKuan-Tun2Socks` 日志中的上游 SOCKS5 连接错误。
+
 ## DNS 与 UDP 说明
 
 本方案优先保证 AnyTLS / NaiveProxy 的 TCP 出站经由家宽 SOCKS5。tun2socks 可以处理 TCP/UDP 包，但 DNS 与 UDP 是否可用取决于上游 SOCKS5 是否支持 UDP 转发，以及业务程序的解析方式。若上游 SOCKS5 不支持 UDP，可能出现域名解析失败或 UDP 流量不可用；此时应另行设计可信 DNS 方案，例如上游侧解析、DoH/DoT 或支持 UDP 的代理链路。
@@ -1119,7 +1398,7 @@ docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.1
 docker run --rm --entrypoint tun2socks jiasongji/jiakuan-tun2socks:latest --help
 ```
 
-并检查 `--device`、`--proxy`、`--interface`、`--loglevel`、`--fwmark` 等参数是否存在，然后才继续部署。官方 Wiki 的 Linux 示例使用 `--device`、`--proxy`、`--interface`；官方源码 `main.go` 也定义了这些参数。
+并检查 `-device`、`-proxy`、`-interface`、`-loglevel`、`-fwmark` 等参数是否存在，然后才继续部署。官方 Wiki 的 Linux 示例使用 `-device`、`-proxy`、`-interface`；官方源码 `main.go` 也定义了这些参数。
 README_EOF
 
   cat >"$PROJECT_DIR/tutorial.html" <<'TUTORIAL_EOF'
@@ -1177,6 +1456,15 @@ bash "$INSTALLER_DIR/bootstrap-install.sh"</pre>
     <pre>bash &lt;项目根目录&gt;/jiakuan-proxy/scripts/verify.sh
 
 docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org</pre>
+    <p>新版脚本会把上游 SOCKS5 显式出口、Docker 入口网络出口、业务命名空间出口都作为关键验证。若失败，安装脚本会回滚本次新部署，不会再伪装成部署成功。</p>
+  </section>
+  <section>
+    <h2>常见故障判断</h2>
+    <ul>
+      <li><code>connect: connection refused</code>：优先检查上游 SOCKS5 IP/端口是否监听、源 IP 是否放行、防火墙是否拦截。</li>
+      <li>显式 SOCKS5 出口检测失败：优先核对上游 SOCKS5 用户名和密码；上游账号密码留空表示无认证。</li>
+      <li>NaiveProxy 日志出现空 <code>Proxy-Authorization</code>：通常是客户端没有带 NaiveProxy 认证或用户名密码不匹配。</li>
+    </ul>
   </section>
   <section>
     <h2>回滚命令</h2>
@@ -1532,7 +1820,12 @@ github_sync_if_requested() {
 
 run_verify() {
   log "开始自动验证。"
-  bash "$PROJECT_DIR/scripts/verify.sh" || true
+  if ! bash "$PROJECT_DIR/scripts/verify.sh"; then
+    err "自动验证失败，开始回滚本次新部署，避免留下不可用服务。"
+    rollback_new_stack
+    err "已回滚。请根据上方验证失败项修复后重新部署。"
+    exit 1
+  fi
 }
 
 final_summary() {
@@ -1597,12 +1890,14 @@ main() {
   cleanup_old_redsocks_if_requested
   cleanup_old_iptables_rules
   post_host_net_guard
-  cleanup_current_project_containers
-  check_public_ports_available
+  preflight_upstream_socks_host
   verify_tun2socks_image_params
   pull_other_images
   ensure_docker_network
   ensure_project_docker_egress_rules
+  preflight_upstream_socks_entry_network
+  cleanup_current_project_containers
+  check_public_ports_available
   ensure_tun_device
   run_tun2socks
   run_business_containers

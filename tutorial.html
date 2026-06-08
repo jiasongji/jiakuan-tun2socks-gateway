@@ -52,6 +52,15 @@ bash "$INSTALLER_DIR/bootstrap-install.sh"</pre>
     <pre>bash &lt;项目根目录&gt;/jiakuan-proxy/scripts/verify.sh
 
 docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org</pre>
+    <p>新版脚本会把上游 SOCKS5 显式出口、Docker 入口网络出口、业务命名空间出口都作为关键验证。若失败，安装脚本会回滚本次新部署，不会再伪装成部署成功。</p>
+  </section>
+  <section>
+    <h2>常见故障判断</h2>
+    <ul>
+      <li><code>connect: connection refused</code>：优先检查上游 SOCKS5 IP/端口是否监听、源 IP 是否放行、防火墙是否拦截。</li>
+      <li>显式 SOCKS5 出口检测失败：优先核对上游 SOCKS5 用户名和密码；上游账号密码留空表示无认证。</li>
+      <li>NaiveProxy 日志出现空 <code>Proxy-Authorization</code>：通常是客户端没有带 NaiveProxy 认证或用户名密码不匹配。</li>
+    </ul>
   </section>
   <section>
     <h2>回滚命令</h2>
