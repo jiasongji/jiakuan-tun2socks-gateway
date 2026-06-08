@@ -31,6 +31,19 @@ check_host_net() {
   timeout 6 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1
 }
 
+
+get_entry_bridge_if() {
+  local net_id bridge_name
+  bridge_name="$(docker network inspect -f '{{ index .Options "com.docker.network.bridge.name" }}' "$ENTRY_NET" 2>/dev/null || true)"
+  if [ -z "$bridge_name" ] || [ "$bridge_name" = "<no value>" ]; then
+    net_id="$(docker network inspect -f '{{.Id}}' "$ENTRY_NET" 2>/dev/null || true)"
+    [ -n "$net_id" ] || return 1
+    bridge_name="br-${net_id:0:12}"
+  fi
+  printf '%s\n' "$bridge_name"
+}
+
+
 section() { printf '\n== %s ==\n' "$*"; }
 
 section "容器状态"
@@ -67,6 +80,32 @@ fi
 
 echo "完整 IPv4 路由表："
 docker exec "$TUN2SOCKS_NAME" ip -4 route 2>/dev/null || true
+
+
+section "Docker 入口网络出站 NAT 检查"
+if command -v iptables >/dev/null 2>&1 && docker network inspect "$ENTRY_NET" >/dev/null 2>&1; then
+  bridge_if="$(get_entry_bridge_if || true)"
+  echo "入口网络：$ENTRY_NET，子网：$ENTRY_SUBNET，bridge：${bridge_if:-未识别}"
+  if [ -n "${bridge_if:-}" ] && iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null; then
+    echo "NAT 规则存在：$ENTRY_SUBNET -> MASQUERADE"
+  else
+    echo "警告：未检测到本项目 Docker 入口网络 NAT 规则，容器可能无法连接上游 SOCKS5。"
+  fi
+else
+  echo "iptables 或 Docker 网络不可用，跳过。"
+fi
+
+section "入口 Docker 网络显式 SOCKS5 出口 IP"
+if docker image inspect "$CURL_IMAGE" >/dev/null 2>&1 || docker pull "$CURL_IMAGE" >/dev/null 2>&1; then
+  if [ -n "${SOCKS_USER:-}" ]; then
+    docker run --rm --network "$ENTRY_NET" "$CURL_IMAGE" -4fsS --connect-timeout 15 --max-time 30 --socks5-hostname "$SOCKS_USER:$SOCKS_PASS@$SOCKS_HOST:$SOCKS_PORT" https://api.ipify.org || true
+  else
+    docker run --rm --network "$ENTRY_NET" "$CURL_IMAGE" -4fsS --connect-timeout 15 --max-time 30 --socks5-hostname "$SOCKS_HOST:$SOCKS_PORT" https://api.ipify.org || true
+  fi
+  echo
+else
+  echo "无法拉取验证用 curl 镜像，跳过入口网络显式 SOCKS5 出口测试。"
+fi
 
 section "业务网络命名空间出口 IP"
 if docker image inspect "$CURL_IMAGE" >/dev/null 2>&1 || docker pull "$CURL_IMAGE" >/dev/null 2>&1; then

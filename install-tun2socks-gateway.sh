@@ -516,7 +516,7 @@ TUN_ENTRY_EOF
     http_port {$NAIVE_HTTP_PORT}
     https_port {$NAIVE_HTTPS_PORT}
     auto_https off
-    order forward_proxy before file_server
+    order forward_proxy before reverse_proxy
 }
 
 :{$NAIVE_HTTP_PORT} {
@@ -590,6 +590,59 @@ set -a
 source "$ENV_FILE"
 set +a
 
+get_entry_bridge_if() {
+  local net_id bridge_name
+  bridge_name="$(docker network inspect -f '{{ index .Options "com.docker.network.bridge.name" }}' "$ENTRY_NET" 2>/dev/null || true)"
+  if [ -z "$bridge_name" ] || [ "$bridge_name" = "<no value>" ]; then
+    net_id="$(docker network inspect -f '{{.Id}}' "$ENTRY_NET" 2>/dev/null || true)"
+    [ -n "$net_id" ] || return 1
+    bridge_name="br-${net_id:0:12}"
+  fi
+  printf '%s\n' "$bridge_name"
+}
+
+ensure_project_docker_egress_rules() {
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo "[提醒] 未找到 iptables，无法补齐 Docker 自定义网络出站 NAT 规则。"
+    return 0
+  fi
+  if ! docker network inspect "$ENTRY_NET" >/dev/null 2>&1; then
+    echo "[提醒] Docker 网络 $ENTRY_NET 不存在，跳过出站 NAT 规则检查。"
+    return 0
+  fi
+  local bridge_if
+  bridge_if="$(get_entry_bridge_if || true)"
+  if [ -z "$bridge_if" ] || ! ip link show "$bridge_if" >/dev/null 2>&1; then
+    echo "[提醒] 未找到 $ENTRY_NET 对应 bridge 接口（推断值：${bridge_if:-空}），跳过出站 NAT 规则检查。"
+    return 0
+  fi
+  echo "[信息] 确保 Docker 入口网络可出站：$ENTRY_SUBNET，经 $bridge_if 做本项目专属 NAT/FORWARD 规则。"
+  iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE
+  iptables -C FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  iptables -C FORWARD -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT
+  iptables -C FORWARD -i "$bridge_if" -o "$bridge_if" -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -i "$bridge_if" -o "$bridge_if" -j ACCEPT
+  iptables -t nat -C DOCKER -i "$bridge_if" -j RETURN 2>/dev/null || \
+    iptables -t nat -I DOCKER 1 -i "$bridge_if" -j RETURN 2>/dev/null || true
+}
+
+remove_project_docker_egress_rules() {
+  command -v iptables >/dev/null 2>&1 || return 0
+  docker network inspect "$ENTRY_NET" >/dev/null 2>&1 || return 0
+  local bridge_if
+  bridge_if="$(get_entry_bridge_if || true)"
+  [ -n "$bridge_if" ] || return 0
+  while iptables -t nat -D POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null; do :; done
+  while iptables -D FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+  while iptables -D FORWARD -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT 2>/dev/null; do :; done
+  while iptables -D FORWARD -i "$bridge_if" -o "$bridge_if" -j ACCEPT 2>/dev/null; do :; done
+  while iptables -t nat -D DOCKER -i "$bridge_if" -j RETURN 2>/dev/null; do :; done
+}
+
+ensure_project_docker_egress_rules
 
 wait_container_running() {
   local name="$1" limit="${2:-45}" i state
@@ -1183,12 +1236,66 @@ ensure_docker_network() {
   fi
 }
 
+
+get_entry_bridge_if() {
+  local net_id bridge_name
+  bridge_name="$(docker network inspect -f '{{ index .Options "com.docker.network.bridge.name" }}' "$ENTRY_NET" 2>/dev/null || true)"
+  if [ -z "$bridge_name" ] || [ "$bridge_name" = "<no value>" ]; then
+    net_id="$(docker network inspect -f '{{.Id}}' "$ENTRY_NET" 2>/dev/null || true)"
+    [ -n "$net_id" ] || return 1
+    bridge_name="br-${net_id:0:12}"
+  fi
+  printf '%s\n' "$bridge_name"
+}
+
+ensure_project_docker_egress_rules() {
+  if ! command -v iptables >/dev/null 2>&1; then
+    warn "未找到 iptables，无法补齐 Docker 自定义网络出站 NAT 规则。"
+    return 0
+  fi
+  if ! docker network inspect "$ENTRY_NET" >/dev/null 2>&1; then
+    warn "Docker 网络 $ENTRY_NET 不存在，跳过出站 NAT 规则检查。"
+    return 0
+  fi
+  local bridge_if
+  bridge_if="$(get_entry_bridge_if || true)"
+  if [ -z "$bridge_if" ] || ! ip link show "$bridge_if" >/dev/null 2>&1; then
+    warn "未找到 $ENTRY_NET 对应 bridge 接口（推断值：${bridge_if:-空}），跳过出站 NAT 规则检查。"
+    return 0
+  fi
+  log "确保 Docker 入口网络可出站：$ENTRY_SUBNET，经 $bridge_if 做本项目专属 NAT/FORWARD 规则。"
+  iptables -t nat -C POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE
+  iptables -C FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  iptables -C FORWARD -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT
+  iptables -C FORWARD -i "$bridge_if" -o "$bridge_if" -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -i "$bridge_if" -o "$bridge_if" -j ACCEPT
+  iptables -t nat -C DOCKER -i "$bridge_if" -j RETURN 2>/dev/null || \
+    iptables -t nat -I DOCKER 1 -i "$bridge_if" -j RETURN 2>/dev/null || true
+}
+
+remove_project_docker_egress_rules() {
+  command -v iptables >/dev/null 2>&1 || return 0
+  docker network inspect "$ENTRY_NET" >/dev/null 2>&1 || return 0
+  local bridge_if
+  bridge_if="$(get_entry_bridge_if || true)"
+  [ -n "$bridge_if" ] || return 0
+  while iptables -t nat -D POSTROUTING -s "$ENTRY_SUBNET" ! -o "$bridge_if" -j MASQUERADE 2>/dev/null; do :; done
+  while iptables -D FORWARD -o "$bridge_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+  while iptables -D FORWARD -i "$bridge_if" ! -o "$bridge_if" -j ACCEPT 2>/dev/null; do :; done
+  while iptables -D FORWARD -i "$bridge_if" -o "$bridge_if" -j ACCEPT 2>/dev/null; do :; done
+  while iptables -t nat -D DOCKER -i "$bridge_if" -j RETURN 2>/dev/null; do :; done
+}
+
 rollback_new_stack() {
   warn "开始回滚本方案新建容器、网络和 systemd 服务。"
   systemctl disable --now jiakuan-tun2socks-gateway.service >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/jiakuan-tun2socks-gateway.service
   systemctl daemon-reload >/dev/null 2>&1 || true
   docker rm -f "$ENTRY_NAIVE_HTTPS_NAME" "$ENTRY_NAIVE_HTTP_NAME" "$ENTRY_ANYTLS_NAME" "$NAIVE_NAME" "$ANYTLS_NAME" "$TUN2SOCKS_NAME" >/dev/null 2>&1 || true
+  remove_project_docker_egress_rules
   docker network rm "$ENTRY_NET" >/dev/null 2>&1 || true
   restore_iptables_if_needed
 }
@@ -1390,6 +1497,7 @@ main() {
   verify_tun2socks_image_params
   pull_other_images
   ensure_docker_network
+  ensure_project_docker_egress_rules
   ensure_tun_device
   run_tun2socks
   run_business_containers

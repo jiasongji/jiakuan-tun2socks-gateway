@@ -29,6 +29,7 @@ tun2socks 默认路由
 - AnyTLS 与 NaiveProxy 使用 `--network container:JiaKuan-Tun2Socks` 共享 tun2socks 网络命名空间。
 - tun2socks 容器内保留 Docker 入口子网走 `eth0`，回包仍返回 socat，避免非对称路由。
 - tun2socks 容器内保留 SOCKS5 服务器 IP 走 `eth0`，避免连接上游 SOCKS5 自身进入 TUN 形成路由环。
+- 脚本会补齐本项目 Docker 入口网络的专属 NAT/FORWARD 规则，保证自定义 bridge 容器能连接上游 SOCKS5；这些规则只匹配 `ENTRY_SUBNET` 与本项目 bridge，回滚时会删除。
 
 ## 默认端口
 
@@ -135,6 +136,7 @@ bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh
 1. 业务容器没有直接发布宿主机端口。
 2. `JiaKuan-Tun2Socks` 中访问普通公网地址的路由走 `tun0`。
 3. Docker 入口子网与 SOCKS5 服务器 IP 的路由走 `eth0`。
+4. 本项目 Docker 入口网络存在专属 MASQUERADE/FORWARD 规则，临时容器能显式通过上游 SOCKS5 出口。
 4. 以下命令输出应为家宽 SOCKS5 的出口 IP：
 
 ```bash
