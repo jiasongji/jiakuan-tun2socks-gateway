@@ -35,11 +35,11 @@ DEFAULT_NAIVE_HTTP_PORT="33802"
 DEFAULT_NAIVE_HTTPS_PORT="33803"
 DEFAULT_FAKE_HOST="https://soft.xiaoz.org"
 
-DEFAULT_TUN2SOCKS_IMAGE="xjasonlyu/tun2socks:latest"
-DEFAULT_ANYTLS_IMAGE="jiasongji/anytls:latest"
-DEFAULT_NAIVE_IMAGE="jiasongji/naiveproxy-docker:latest"
-DEFAULT_SOCAT_IMAGE="alpine/socat:latest"
-DEFAULT_CURL_IMAGE="curlimages/curl:8.10.1"
+DEFAULT_TUN2SOCKS_IMAGE="jiasongji/jiakuan-tun2socks:latest"
+DEFAULT_ANYTLS_IMAGE="jiasongji/jiakuan-anytls:latest"
+DEFAULT_NAIVE_IMAGE="jiasongji/jiakuan-naiveproxy:latest"
+DEFAULT_SOCAT_IMAGE="jiasongji/jiakuan-socat:latest"
+DEFAULT_CURL_IMAGE="jiasongji/jiakuan-curl:8.10.1"
 DEFAULT_GITHUB_REPO_URL="https://github.com/jiasongji/jiakuan-tun2socks-gateway"
 
 HOST_NET_OK_BEFORE="no"
@@ -423,11 +423,11 @@ NAIVE_USER=请替换为用户名
 NAIVE_PASS=请替换为强随机密码
 FAKE_HOST=https://soft.xiaoz.org
 
-TUN2SOCKS_IMAGE=xjasonlyu/tun2socks:latest
-ANYTLS_IMAGE=jiasongji/anytls:latest
-NAIVE_IMAGE=jiasongji/naiveproxy-docker:latest
-SOCAT_IMAGE=alpine/socat:latest
-CURL_IMAGE=curlimages/curl:8.10.1
+TUN2SOCKS_IMAGE=jiasongji/jiakuan-tun2socks:latest
+ANYTLS_IMAGE=jiasongji/jiakuan-anytls:latest
+NAIVE_IMAGE=jiasongji/jiakuan-naiveproxy:latest
+SOCAT_IMAGE=jiasongji/jiakuan-socat:latest
+CURL_IMAGE=jiasongji/jiakuan-curl:8.10.1
 
 GITHUB_REPO_URL=https://github.com/jiasongji/jiakuan-tun2socks-gateway
 ENV_EXAMPLE_EOF
@@ -941,7 +941,7 @@ bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh
 4. 以下命令输出应为家宽 SOCKS5 的出口 IP：
 
 ```bash
-docker run --rm --network container:JiaKuan-Tun2Socks curlimages/curl:8.10.1 -4fsS https://api.ipify.org
+docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org
 ```
 
 ## DNS 与 UDP 说明
@@ -960,7 +960,7 @@ docker run --rm --network container:JiaKuan-Tun2Socks curlimages/curl:8.10.1 -4f
 安装脚本会在目标服务器上执行：
 
 ```bash
-docker run --rm --entrypoint tun2socks xjasonlyu/tun2socks:latest --help
+docker run --rm --entrypoint tun2socks jiasongji/jiakuan-tun2socks:latest --help
 ```
 
 并检查 `--device`、`--proxy`、`--interface`、`--loglevel`、`--fwmark` 等参数是否存在，然后才继续部署。官方 Wiki 的 Linux 示例使用 `--device`、`--proxy`、`--interface`；官方源码 `main.go` 也定义了这些参数。
@@ -1023,7 +1023,7 @@ bash install-tun2socks-gateway.sh</pre>
     <h2>验证命令</h2>
     <pre>bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/verify.sh
 
-docker run --rm --network container:JiaKuan-Tun2Socks curlimages/curl:8.10.1 -4fsS https://api.ipify.org</pre>
+docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org</pre>
   </section>
   <section>
     <h2>回滚命令</h2>

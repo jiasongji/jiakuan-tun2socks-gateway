@@ -40,6 +40,32 @@ tun2socks 默认路由
 | NaiveProxy HTTP/伪装 | 33802 | JiaKuan-Entry-NaiveHTTP | 172.31.253.10:33802 |
 | NaiveProxy HTTPS | 33803 | JiaKuan-Entry-NaiveHTTPS | 172.31.253.10:33803 |
 
+
+## Docker 镜像策略
+
+本项目默认使用自己 Docker Hub 账号下的项目专用镜像，避免目标服务器直接依赖第三方命名空间：
+
+| 用途 | 默认镜像 | 说明 |
+| --- | --- | --- |
+| tun2socks 网关 | `jiasongji/jiakuan-tun2socks:latest` | 基于官方 tun2socks 镜像封装本项目入口脚本 |
+| AnyTLS | `jiasongji/jiakuan-anytls:latest` | 基于自己账号下已有 AnyTLS 镜像封装 |
+| NaiveProxy | `jiasongji/jiakuan-naiveproxy:latest` | 基于自己账号下已有 NaiveProxy 镜像封装 |
+| socat 入口 | `jiasongji/jiakuan-socat:latest` | 基于 socat 镜像封装 |
+| 验证 curl | `jiasongji/jiakuan-curl:8.10.1` | 验证出口 IP 使用 |
+
+如需重新构建并推送这些镜像，在本机 Docker 已登录后执行：
+
+```bash
+cd /Users/mac/Desktop/Srv/Proxy-VPS/VP-SJC/jiakuan-tun2socks-gateway
+BUILD_PLATFORMS=linux/amd64 DOCKER_NAMESPACE=jiasongji bash scripts/docker-build-push.sh
+```
+
+目标服务器通常是 Debian 12 amd64 VPS，因此默认平台是 `linux/amd64`。如果要同时发布 ARM64，可改为：
+
+```bash
+BUILD_PLATFORMS=linux/amd64,linux/arm64 DOCKER_NAMESPACE=jiasongji bash scripts/docker-build-push.sh
+```
+
 ## 一键部署
 
 > 目标服务器需要已安装 Docker；脚本不会默认安装 Docker、不会默认重启 Docker、不会默认修改宿主机默认路由、不会默认迁移 Docker 全局数据目录。
@@ -110,7 +136,7 @@ bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh
 4. 以下命令输出应为家宽 SOCKS5 的出口 IP：
 
 ```bash
-docker run --rm --network container:JiaKuan-Tun2Socks curlimages/curl:8.10.1 -4fsS https://api.ipify.org
+docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org
 ```
 
 ## DNS 与 UDP 说明
@@ -129,7 +155,7 @@ docker run --rm --network container:JiaKuan-Tun2Socks curlimages/curl:8.10.1 -4f
 安装脚本会在目标服务器上执行：
 
 ```bash
-docker run --rm --entrypoint tun2socks xjasonlyu/tun2socks:latest --help
+docker run --rm --entrypoint tun2socks jiasongji/jiakuan-tun2socks:latest --help
 ```
 
 并检查 `--device`、`--proxy`、`--interface`、`--loglevel`、`--fwmark` 等参数是否存在，然后才继续部署。官方 Wiki 的 Linux 示例使用 `--device`、`--proxy`、`--interface`；官方源码 `main.go` 也定义了这些参数。
