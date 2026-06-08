@@ -74,23 +74,24 @@ BUILD_PLATFORMS=linux/amd64,linux/arm64 DOCKER_NAMESPACE=jiasongji bash scripts/
 > 目标服务器需要已安装 Docker；脚本不会默认安装 Docker、不会默认重启 Docker、不会默认修改宿主机默认路由、不会默认迁移 Docker 全局数据目录。
 
 ```bash
-mkdir -p /www/wwwroot/sjc.giize.com
-cd /www/wwwroot/sjc.giize.com
-if [ ! -d jiakuan-proxy/.git ]; then
-  git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git jiakuan-proxy
-fi
-cd jiakuan-proxy
-git pull --ff-only || true
-chmod +x install-tun2socks-gateway.sh
-bash install-tun2socks-gateway.sh
+INSTALLER_DIR=/tmp/jiakuan-tun2socks-gateway-installer
+rm -rf "$INSTALLER_DIR"
+git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git "$INSTALLER_DIR"
+bash "$INSTALLER_DIR/bootstrap-install.sh"
+```
+
+也可以用环境变量预填域名或项目根目录，仍会进入交互确认：
+
+```bash
+JIAKUAN_DOMAIN=example.com JIAKUAN_PROJECT_ROOT=/www/wwwroot/example.com bash /tmp/jiakuan-tun2socks-gateway-installer/bootstrap-install.sh
 ```
 
 ## 交互项说明
 
 脚本会询问：
 
-- 项目根目录，默认 `/www/wwwroot/sjc.giize.com`
-- 域名，默认 `sjc.giize.com`
+- 域名：无固定默认值；如果当前目录是 `<域名>/jiakuan-proxy`，会自动推断。
+- 项目根目录：默认 `/www/wwwroot/<域名>`；也可输入任意绝对路径，例如 `/data/sites/example.com`。
 - 证书 fullchain 路径与 privkey 路径
 - 家宽 SOCKS5 IP/域名、端口、用户名、密码
 - AnyTLS 端口与密码
@@ -115,18 +116,18 @@ bash install-tun2socks-gateway.sh
 
 ```bash
 # 验证容器、端口、路由、出口 IP 和日志
-bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/verify.sh
+bash <项目根目录>/jiakuan-proxy/scripts/verify.sh
 
 # 按正确顺序重启
 systemctl restart jiakuan-tun2socks-gateway.service
 # 或
-bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/restart.sh
+bash <项目根目录>/jiakuan-proxy/scripts/restart.sh
 
 # 停止本组容器
-bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/stop.sh
+bash <项目根目录>/jiakuan-proxy/scripts/stop.sh
 
 # 回滚本方案创建的容器、网络和 systemd 服务
-bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh
+bash <项目根目录>/jiakuan-proxy/scripts/rollback.sh
 ```
 
 ## 验证重点
@@ -137,7 +138,7 @@ bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh
 2. `JiaKuan-Tun2Socks` 中访问普通公网地址的路由走 `tun0`。
 3. Docker 入口子网与 SOCKS5 服务器 IP 的路由走 `eth0`。
 4. 本项目 Docker 入口网络存在专属 MASQUERADE/FORWARD 规则，临时容器能显式通过上游 SOCKS5 出口。
-4. 以下命令输出应为家宽 SOCKS5 的出口 IP：
+5. 以下命令输出应为家宽 SOCKS5 的出口 IP：
 
 ```bash
 docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org

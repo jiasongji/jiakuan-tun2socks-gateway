@@ -6,9 +6,9 @@ IFS=$'
 # Debian 12 + 宝塔面板 + Docker：tun2socks + socat 家宽 SOCKS5 出口网关交互式部署脚本。
 # 默认不安装 Docker、不重启 Docker、不修改宿主机默认路由、不迁移 Docker 全局 data-root。
 
-VERSION="2026-06-08.1"
-DEFAULT_PROJECT_ROOT="/www/wwwroot/sjc.giize.com"
-DEFAULT_DOMAIN="sjc.giize.com"
+VERSION="2026-06-08.2"
+DEFAULT_PROJECT_ROOT="${JIAKUAN_PROJECT_ROOT:-}"
+DEFAULT_DOMAIN="${JIAKUAN_DOMAIN:-}"
 DEFAULT_CERT_FILE=""
 DEFAULT_CERT_KEY_FILE=""
 
@@ -92,6 +92,33 @@ prompt_secret_optional() {
   read -r -s -p "$label（无则直接回车）: " input
   echo
   printf -v "$var_name" '%s' "$input"
+}
+
+infer_project_root() {
+  if [ -n "${JIAKUAN_PROJECT_ROOT:-}" ]; then
+    printf '%s\n' "${JIAKUAN_PROJECT_ROOT%/}"
+    return 0
+  fi
+  local script_dir pwd_dir candidate
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  pwd_dir="$(pwd -P 2>/dev/null || pwd)"
+  for candidate in "$pwd_dir" "$script_dir"; do
+    if [ "$(basename "$candidate")" = "jiakuan-proxy" ]; then
+      printf '%s\n' "$(dirname "$candidate")"
+      return 0
+    fi
+  done
+  return 1
+}
+
+infer_domain_from_root() {
+  local root="${1:-}" base=""
+  [ -n "$root" ] || return 1
+  base="$(basename "$root")"
+  case "$base" in
+    *.*) printf '%s\n' "$base"; return 0 ;;
+  esac
+  return 1
 }
 
 prompt_secret_auto() {
@@ -275,10 +302,27 @@ collect_inputs() {
   log "AnyTLS/NaiveProxy 本地账号密码直接回车会自动生成；上游 SOCKS5 账号密码留空表示无认证。"
   echo
 
-  prompt_default PROJECT_ROOT "项目根目录" "$DEFAULT_PROJECT_ROOT"
+  local inferred_root="" inferred_domain="" project_root_default=""
+  inferred_root="$(infer_project_root 2>/dev/null || true)"
+  inferred_domain="$(infer_domain_from_root "$inferred_root" 2>/dev/null || true)"
+
+  prompt_default DOMAIN "域名" "${DEFAULT_DOMAIN:-$inferred_domain}"
+  if [ -z "$DOMAIN" ]; then
+    err "域名不能为空。请填写实际绑定证书的域名，例如 example.com。"
+    exit 1
+  fi
+
+  project_root_default="${DEFAULT_PROJECT_ROOT:-}"
+  if [ -z "$project_root_default" ] && [ -n "$inferred_root" ] && [ "$(basename "$inferred_root")" = "$DOMAIN" ]; then
+    project_root_default="$inferred_root"
+  fi
+  if [ -z "$project_root_default" ]; then
+    project_root_default="/www/wwwroot/$DOMAIN"
+  fi
+  prompt_default PROJECT_ROOT "项目根目录" "$project_root_default"
   PROJECT_ROOT="${PROJECT_ROOT%/}"
   PROJECT_DIR="$PROJECT_ROOT/jiakuan-proxy"
-  prompt_default DOMAIN "域名" "$DEFAULT_DOMAIN"
+
   prompt_default CERT_FILE "证书 fullchain 路径" "${DEFAULT_CERT_FILE:-/www/server/panel/vhost/cert/$DOMAIN/fullchain.pem}"
   prompt_default CERT_KEY_FILE "证书 privkey 路径" "${DEFAULT_CERT_KEY_FILE:-/www/server/panel/vhost/cert/$DOMAIN/privkey.pem}"
 
@@ -388,11 +432,11 @@ GITIGNORE_EOF
   cat >"$PROJECT_DIR/jiakuan.env.example" <<'ENV_EXAMPLE_EOF'
 # jiakuan.env 示例：复制为 jiakuan.env 后按实际值填写。
 # 真实 jiakuan.env 由 install-tun2socks-gateway.sh 交互生成，权限应为 600，不得提交到 GitHub。
-PROJECT_ROOT=/www/wwwroot/sjc.giize.com
-PROJECT_DIR=/www/wwwroot/sjc.giize.com/jiakuan-proxy
-DOMAIN=sjc.giize.com
-CERT_FILE=/www/server/panel/vhost/cert/sjc.giize.com/fullchain.pem
-CERT_KEY_FILE=/www/server/panel/vhost/cert/sjc.giize.com/privkey.pem
+PROJECT_ROOT=/www/wwwroot/example.com
+PROJECT_DIR=/www/wwwroot/example.com/jiakuan-proxy
+DOMAIN=example.com
+CERT_FILE=/www/server/panel/vhost/cert/example.com/fullchain.pem
+CERT_KEY_FILE=/www/server/panel/vhost/cert/example.com/privkey.pem
 
 TUN2SOCKS_NAME=JiaKuan-Tun2Socks
 ANYTLS_NAME=AnyTLS_JiaKuan
@@ -861,7 +905,7 @@ echo "回滚完成：未删除证书、宝塔站点、项目目录和无关 Dock
 ROLLBACK_SH_EOF
 
   chmod +x "$PROJECT_DIR/scripts/rollback.sh"
-  cat >"$PROJECT_DIR/systemd/jiakuan-tun2socks-gateway.service.example" <<'SYSTEMD_EOF'
+  cat >"$PROJECT_DIR/systemd/jiakuan-tun2socks-gateway.service.example" <<SYSTEMD_EOF
 [Unit]
 Description=家宽 SOCKS5 出口网关（tun2socks + socat + AnyTLS + NaiveProxy）
 Requires=docker.service
@@ -871,9 +915,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/www/wwwroot/sjc.giize.com/jiakuan-proxy
-ExecStart=/www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/start.sh
-ExecStop=/www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/stop.sh
+WorkingDirectory=$PROJECT_DIR
+ExecStart=$PROJECT_DIR/scripts/start.sh
+ExecStop=$PROJECT_DIR/scripts/stop.sh
 TimeoutStartSec=180
 TimeoutStopSec=90
 
@@ -930,23 +974,24 @@ tun2socks 默认路由
 > 目标服务器需要已安装 Docker；脚本不会默认安装 Docker、不会默认重启 Docker、不会默认修改宿主机默认路由、不会默认迁移 Docker 全局数据目录。
 
 ```bash
-mkdir -p /www/wwwroot/sjc.giize.com
-cd /www/wwwroot/sjc.giize.com
-if [ ! -d jiakuan-proxy/.git ]; then
-  git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git jiakuan-proxy
-fi
-cd jiakuan-proxy
-git pull --ff-only || true
-chmod +x install-tun2socks-gateway.sh
-bash install-tun2socks-gateway.sh
+INSTALLER_DIR=/tmp/jiakuan-tun2socks-gateway-installer
+rm -rf "$INSTALLER_DIR"
+git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git "$INSTALLER_DIR"
+bash "$INSTALLER_DIR/bootstrap-install.sh"
+```
+
+也可以用环境变量预填域名或项目根目录，仍会进入交互确认：
+
+```bash
+JIAKUAN_DOMAIN=example.com JIAKUAN_PROJECT_ROOT=/www/wwwroot/example.com bash /tmp/jiakuan-tun2socks-gateway-installer/bootstrap-install.sh
 ```
 
 ## 交互项说明
 
 脚本会询问：
 
-- 项目根目录，默认 `/www/wwwroot/sjc.giize.com`
-- 域名，默认 `sjc.giize.com`
+- 域名：无固定默认值；如果当前目录是 `<域名>/jiakuan-proxy`，会自动推断。
+- 项目根目录：默认 `/www/wwwroot/<域名>`；也可输入任意绝对路径，例如 `/data/sites/example.com`。
 - 证书 fullchain 路径与 privkey 路径
 - 家宽 SOCKS5 IP/域名、端口、用户名、密码
 - AnyTLS 端口与密码
@@ -971,18 +1016,18 @@ bash install-tun2socks-gateway.sh
 
 ```bash
 # 验证容器、端口、路由、出口 IP 和日志
-bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/verify.sh
+bash <项目根目录>/jiakuan-proxy/scripts/verify.sh
 
 # 按正确顺序重启
 systemctl restart jiakuan-tun2socks-gateway.service
 # 或
-bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/restart.sh
+bash <项目根目录>/jiakuan-proxy/scripts/restart.sh
 
 # 停止本组容器
-bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/stop.sh
+bash <项目根目录>/jiakuan-proxy/scripts/stop.sh
 
 # 回滚本方案创建的容器、网络和 systemd 服务
-bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh
+bash <项目根目录>/jiakuan-proxy/scripts/rollback.sh
 ```
 
 ## 验证重点
@@ -993,7 +1038,7 @@ bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh
 2. `JiaKuan-Tun2Socks` 中访问普通公网地址的路由走 `tun0`。
 3. Docker 入口子网与 SOCKS5 服务器 IP 的路由走 `eth0`。
 4. 本项目 Docker 入口网络存在专属 MASQUERADE/FORWARD 规则，临时容器能显式通过上游 SOCKS5 出口。
-4. 以下命令输出应为家宽 SOCKS5 的出口 IP：
+5. 以下命令输出应为家宽 SOCKS5 的出口 IP：
 
 ```bash
 docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org
@@ -1055,15 +1100,11 @@ README_EOF
   </section>
   <section>
     <h2>一键执行</h2>
-    <pre>mkdir -p /www/wwwroot/sjc.giize.com
-cd /www/wwwroot/sjc.giize.com
-if [ ! -d jiakuan-proxy/.git ]; then
-  git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git jiakuan-proxy
-fi
-cd jiakuan-proxy
-git pull --ff-only || true
-chmod +x install-tun2socks-gateway.sh
-bash install-tun2socks-gateway.sh</pre>
+    <pre>INSTALLER_DIR=/tmp/jiakuan-tun2socks-gateway-installer
+rm -rf "$INSTALLER_DIR"
+git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git "$INSTALLER_DIR"
+bash "$INSTALLER_DIR/bootstrap-install.sh"</pre>
+    <p>脚本会先询问域名，再默认给出 <code>/www/wwwroot/&lt;域名&gt;</code> 作为项目根目录；也可以输入任意绝对路径。</p>
   </section>
   <section>
     <h2>默认端口</h2>
@@ -1076,13 +1117,13 @@ bash install-tun2socks-gateway.sh</pre>
   </section>
   <section>
     <h2>验证命令</h2>
-    <pre>bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/verify.sh
+    <pre>bash &lt;项目根目录&gt;/jiakuan-proxy/scripts/verify.sh
 
 docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org</pre>
   </section>
   <section>
     <h2>回滚命令</h2>
-    <pre>bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh</pre>
+    <pre>bash &lt;项目根目录&gt;/jiakuan-proxy/scripts/rollback.sh</pre>
   </section>
   <section class="warn">
     <h2>风险提示</h2>
@@ -1101,6 +1142,10 @@ TUTORIAL_EOF
   if [ -r "${BASH_SOURCE[0]}" ] && [ "$(readlink -f "${BASH_SOURCE[0]}")" != "$(readlink -f "$PROJECT_DIR/install-tun2socks-gateway.sh" 2>/dev/null || true)" ]; then
     cp "${BASH_SOURCE[0]}" "$PROJECT_DIR/install-tun2socks-gateway.sh"
     chmod +x "$PROJECT_DIR/install-tun2socks-gateway.sh"
+  fi
+  if [ -r "$(dirname "${BASH_SOURCE[0]}")/bootstrap-install.sh" ]; then
+    cp "$(dirname "${BASH_SOURCE[0]}")/bootstrap-install.sh" "$PROJECT_DIR/bootstrap-install.sh"
+    chmod +x "$PROJECT_DIR/bootstrap-install.sh"
   fi
 }
 
@@ -1418,7 +1463,7 @@ github_sync_if_requested() {
   else
     git remote add origin "https://github.com/${owner_repo}.git"
   fi
-  git add install-tun2socks-gateway.sh README.md .gitignore jiakuan.env.example tun2socks-entrypoint.sh naive-data/Caddyfile naive-data/entry.sh scripts/*.sh systemd/*.service.example tutorial.html
+  git add bootstrap-install.sh install-tun2socks-gateway.sh README.md .gitignore jiakuan.env.example tun2socks-entrypoint.sh naive-data/Caddyfile naive-data/entry.sh scripts/*.sh systemd/*.service.example tutorial.html
   git rm --cached jiakuan.env >/dev/null 2>&1 || true
   if git diff --cached --quiet; then
     log "GitHub 模板文件无新变化，跳过提交。"

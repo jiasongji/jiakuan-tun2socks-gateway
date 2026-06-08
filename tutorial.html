@@ -31,15 +31,11 @@
   </section>
   <section>
     <h2>一键执行</h2>
-    <pre>mkdir -p /www/wwwroot/sjc.giize.com
-cd /www/wwwroot/sjc.giize.com
-if [ ! -d jiakuan-proxy/.git ]; then
-  git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git jiakuan-proxy
-fi
-cd jiakuan-proxy
-git pull --ff-only || true
-chmod +x install-tun2socks-gateway.sh
-bash install-tun2socks-gateway.sh</pre>
+    <pre>INSTALLER_DIR=/tmp/jiakuan-tun2socks-gateway-installer
+rm -rf "$INSTALLER_DIR"
+git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git "$INSTALLER_DIR"
+bash "$INSTALLER_DIR/bootstrap-install.sh"</pre>
+    <p>脚本会先询问域名，再默认给出 <code>/www/wwwroot/&lt;域名&gt;</code> 作为项目根目录；也可以输入任意绝对路径。</p>
   </section>
   <section>
     <h2>默认端口</h2>
@@ -52,13 +48,13 @@ bash install-tun2socks-gateway.sh</pre>
   </section>
   <section>
     <h2>验证命令</h2>
-    <pre>bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/verify.sh
+    <pre>bash &lt;项目根目录&gt;/jiakuan-proxy/scripts/verify.sh
 
 docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.10.1 -4fsS https://api.ipify.org</pre>
   </section>
   <section>
     <h2>回滚命令</h2>
-    <pre>bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh</pre>
+    <pre>bash &lt;项目根目录&gt;/jiakuan-proxy/scripts/rollback.sh</pre>
   </section>
   <section class="warn">
     <h2>风险提示</h2>

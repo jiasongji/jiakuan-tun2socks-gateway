@@ -7,9 +7,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/www/wwwroot/sjc.giize.com/jiakuan-proxy
-ExecStart=/www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/start.sh
-ExecStop=/www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/stop.sh
+WorkingDirectory=<项目根目录>/jiakuan-proxy
+ExecStart=<项目根目录>/jiakuan-proxy/scripts/start.sh
+ExecStop=<项目根目录>/jiakuan-proxy/scripts/stop.sh
 TimeoutStartSec=180
 TimeoutStopSec=90
 
