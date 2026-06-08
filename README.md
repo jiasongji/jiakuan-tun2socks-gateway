@@ -160,4 +160,4 @@ docker run --rm --network container:JiaKuan-Tun2Socks jiasongji/jiakuan-curl:8.1
 docker run --rm --entrypoint tun2socks jiasongji/jiakuan-tun2socks:latest --help
 ```
 
-并检查 `--device`、`--proxy`、`--interface`、`--loglevel`、`--fwmark` 等参数是否存在，然后才继续部署。官方 Wiki 的 Linux 示例使用 `--device`、`--proxy`、`--interface`；官方源码 `main.go` 也定义了这些参数。
+并检查 `-device`、`-proxy`、`-interface`、`-loglevel`、`-fwmark` 等参数是否存在，然后才继续部署。官方 Wiki 的 Linux 示例使用 `-device`、`-proxy`、`-interface`；官方源码 `main.go` 也定义了这些参数。

@@ -507,7 +507,7 @@ log "当前路由表："
 ip route || true
 log "启动 tun2socks，日志级别：$LOGLEVEL"
 # shellcheck disable=SC2086
-exec tun2socks --device "$TUN" --proxy "$PROXY" --interface "$ETH_DEV" --loglevel "$LOGLEVEL" --fwmark "$FWMARK" $EXTRA_TUN_ARGS
+exec tun2socks -device "$TUN" -proxy "$PROXY" -interface "$ETH_DEV" -loglevel "$LOGLEVEL" -fwmark "$FWMARK" $EXTRA_TUN_ARGS
 TUN_ENTRY_EOF
 
   chmod +x "$PROJECT_DIR/tun2socks-entrypoint.sh"
@@ -1056,9 +1056,11 @@ verify_tun2socks_image_params() {
     warn "tun2socks --help 返回非零状态，继续检查输出内容。"
   fi
   chmod 600 "$help_file" || true
-  for flag in --device --proxy --interface --loglevel --fwmark; do
-    if ! grep -q -- "$flag" "$help_file"; then
-      err "当前 $TUN2SOCKS_IMAGE 帮助信息未发现参数 $flag。已保存帮助输出：$help_file"
+  # Go flag 帮助通常显示单横线参数，例如 -device；部分命令行也兼容双横线。
+  # 因此这里同时兼容 -device 与 --device，避免把有效镜像误判为无效。
+  for flag in device proxy interface loglevel fwmark; do
+    if ! grep -Eq "(^|[[:space:]])--?${flag}([[:space:]]|$)" "$help_file"; then
+      err "当前 $TUN2SOCKS_IMAGE 帮助信息未发现参数 -$flag。已保存帮助输出：$help_file"
       exit 1
     fi
   done

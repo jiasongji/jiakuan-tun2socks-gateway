@@ -72,4 +72,4 @@ log "当前路由表："
 ip route || true
 log "启动 tun2socks，日志级别：$LOGLEVEL"
 # shellcheck disable=SC2086
-exec tun2socks --device "$TUN" --proxy "$PROXY" --interface "$ETH_DEV" --loglevel "$LOGLEVEL" --fwmark "$FWMARK" $EXTRA_TUN_ARGS
+exec tun2socks -device "$TUN" -proxy "$PROXY" -interface "$ETH_DEV" -loglevel "$LOGLEVEL" -fwmark "$FWMARK" $EXTRA_TUN_ARGS
