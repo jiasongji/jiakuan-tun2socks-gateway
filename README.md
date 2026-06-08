@@ -53,6 +53,8 @@ tun2socks 默认路由
 | socat 入口 | `jiasongji/jiakuan-socat:latest` | 基于 socat 镜像封装 |
 | 验证 curl | `jiasongji/jiakuan-curl:8.10.1` | 验证出口 IP 使用 |
 
+也可以使用仓库内的 GitHub Actions 工作流“发布 Docker 镜像”在云端构建推送。工作流需要仓库 Secrets：`DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`，不会把明文凭据写入代码。
+
 如需重新构建并推送这些镜像，在本机 Docker 已登录后执行：
 
 ```bash

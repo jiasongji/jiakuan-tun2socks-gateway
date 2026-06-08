@@ -1,0 +1,63 @@
+name: 发布 Docker 镜像
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "构建平台"
+        required: true
+        default: "linux/amd64"
+  push:
+    branches: ["main"]
+    paths:
+      - "docker/**"
+      - "tun2socks-entrypoint.sh"
+      - ".github/workflows/docker-publish.yml"
+
+jobs:
+  docker:
+    name: 构建并推送 ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: jiakuan-tun2socks
+            tag: latest
+            file: docker/tun2socks/Dockerfile
+          - name: jiakuan-socat
+            tag: latest
+            file: docker/socat/Dockerfile
+          - name: jiakuan-curl
+            tag: "8.10.1"
+            file: docker/curl/Dockerfile
+          - name: jiakuan-anytls
+            tag: latest
+            file: docker/anytls/Dockerfile
+          - name: jiakuan-naiveproxy
+            tag: latest
+            file: docker/naiveproxy/Dockerfile
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: ${{ github.event.inputs.platforms || 'linux/amd64' }}
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.name }}:${{ matrix.tag }}
