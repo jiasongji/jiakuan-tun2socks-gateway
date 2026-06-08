@@ -1,0 +1,27 @@
+{
+    http_port {$NAIVE_HTTP_PORT}
+    https_port {$NAIVE_HTTPS_PORT}
+    auto_https off
+    order forward_proxy before file_server
+}
+
+:{$NAIVE_HTTP_PORT} {
+    reverse_proxy {$FAKE_HOST} {
+        header_up Host {upstream_hostport}
+    }
+}
+
+:{$NAIVE_HTTPS_PORT}, {$DOMAIN} {
+    tls /cert/fullchain.pem /cert/privkey.pem
+    route {
+        forward_proxy {
+            basic_auth {$NAIVE_USER} {$NAIVE_PASS}
+            hide_ip
+            hide_via
+            probe_resistance
+        }
+        reverse_proxy {$FAKE_HOST} {
+            header_up Host {upstream_hostport}
+        }
+    }
+}

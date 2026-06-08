@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>家宽 SOCKS5 出口网关部署教程</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.75; margin: 0; color: #172033; background: #f6f8fb; }
+    main { max-width: 980px; margin: 0 auto; padding: 32px 18px 64px; }
+    section { background: #fff; border: 1px solid #e6eaf2; border-radius: 14px; padding: 22px; margin: 18px 0; box-shadow: 0 8px 28px rgba(20, 30, 55, .06); }
+    h1, h2 { line-height: 1.25; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 12px; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #e6eaf2; padding: 10px; text-align: left; }
+    .warn { background: #fff7ed; border-color: #fed7aa; }
+    .ok { background: #ecfdf5; border-color: #bbf7d0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>家宽 SOCKS5 出口网关部署教程</h1>
+  <section>
+    <h2>方案目标</h2>
+    <p>公网客户端连接 VPS 的本地端口；AnyTLS 与 NaiveProxy 访问外部网站时，实际出口走另一台家宽服务器提供的 SOCKS5。</p>
+    <pre>公网客户端 → socat 入口容器 → tun2socks 网络命名空间 → 家宽 SOCKS5 → 目标网站</pre>
+  </section>
+  <section>
+    <h2>为什么能避免非对称路由</h2>
+    <p>公网入口只进入 socat 容器，socat 再连接 Docker bridge 内固定 IP。tun2socks 容器内为 Docker 入口子网保留 eth0 直连路由，所以业务容器给 socat 的回包仍走 eth0 返回，不会被默认 TUN 路由送往 SOCKS5。</p>
+  </section>
+  <section>
+    <h2>一键执行</h2>
+    <pre>mkdir -p /www/wwwroot/sjc.giize.com
+cd /www/wwwroot/sjc.giize.com
+if [ ! -d jiakuan-proxy/.git ]; then
+  git clone https://github.com/jiasongji/jiakuan-tun2socks-gateway.git jiakuan-proxy
+fi
+cd jiakuan-proxy
+git pull --ff-only || true
+chmod +x install-tun2socks-gateway.sh
+bash install-tun2socks-gateway.sh</pre>
+  </section>
+  <section>
+    <h2>默认端口</h2>
+    <table>
+      <tr><th>服务</th><th>宿主机端口</th><th>入口容器</th><th>后端目标</th></tr>
+      <tr><td>AnyTLS</td><td>33801</td><td>JiaKuan-Entry-AnyTLS</td><td>172.31.253.10:33801</td></tr>
+      <tr><td>NaiveProxy HTTP</td><td>33802</td><td>JiaKuan-Entry-NaiveHTTP</td><td>172.31.253.10:33802</td></tr>
+      <tr><td>NaiveProxy HTTPS</td><td>33803</td><td>JiaKuan-Entry-NaiveHTTPS</td><td>172.31.253.10:33803</td></tr>
+    </table>
+  </section>
+  <section>
+    <h2>验证命令</h2>
+    <pre>bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/verify.sh
+
+docker run --rm --network container:JiaKuan-Tun2Socks curlimages/curl:8.10.1 -4fsS https://api.ipify.org</pre>
+  </section>
+  <section>
+    <h2>回滚命令</h2>
+    <pre>bash /www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/rollback.sh</pre>
+  </section>
+  <section class="warn">
+    <h2>风险提示</h2>
+    <ul>
+      <li>脚本不会默认迁移 Docker 全局 data-root；如选择迁移，必须二次输入 <code>MIGRATE</code>。</li>
+      <li>真实密码写入 <code>jiakuan.env</code>，权限为 600，不提交到 GitHub。</li>
+      <li>若上游 SOCKS5 不支持 UDP，DNS 或 UDP 业务可能不可用；本方案优先保证 TCP 出口。</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

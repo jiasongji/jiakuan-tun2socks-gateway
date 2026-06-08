@@ -1,0 +1,17 @@
+[Unit]
+Description=家宽 SOCKS5 出口网关（tun2socks + socat + AnyTLS + NaiveProxy）
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/www/wwwroot/sjc.giize.com/jiakuan-proxy
+ExecStart=/www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/start.sh
+ExecStop=/www/wwwroot/sjc.giize.com/jiakuan-proxy/scripts/stop.sh
+TimeoutStartSec=180
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
